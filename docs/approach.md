@@ -111,9 +111,9 @@ POST /api/v1/coupons/validate
   "couponCode": "PIZZA10",
   "isValid": true,
   "rejectionReason": null,
-  "subtotal": 27.00,
-  "discountAmount": 2.70,
-  "total": 24.30,
+  "subtotal": 31.50,
+  "discountAmount": 3.15,
+  "total": 28.35,
   "description": "10% off your order"
 }
 ```

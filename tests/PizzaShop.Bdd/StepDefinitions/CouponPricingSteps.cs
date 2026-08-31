@@ -28,6 +28,9 @@ public sealed class CouponPricingSteps
     // Result of the last Price() call.
     private OrderPricing? _result;
 
+    // Set when a scenario expects basket construction to be refused outright.
+    private Exception? _refusal;
+
     // ── Background ─────────────────────────────────────────────────────────
 
     [Given("the menu has the following pizzas:")]
@@ -158,6 +161,35 @@ public sealed class CouponPricingSteps
         // The mapping from readable step text to the enum lives here, not in the feature file.
         var expected = Enum.Parse<CouponRejectionReason>(reason);
         Assert.Equal(expected, _result!.RejectionReason);
+    }
+
+    // ── Basket bounds ────────────────────────────────────────────────────────
+
+    [When("I price the basket without a coupon expecting it to be refused")]
+    public async Task WhenPricingIsRefused()
+    {
+        try
+        {
+            await BuildBasketAsync();
+        }
+        catch (Exception ex)
+        {
+            // Captured rather than allowed to fail the scenario: refusing is the
+            // behaviour under test, so the Then step decides whether the right thing
+            // was refused for the right reason.
+            _refusal = ex;
+        }
+    }
+
+    [Then("pricing should be refused because the quantity is out of range")]
+    public void ThenRefusedForQuantity()
+    {
+        Assert.NotNull(_refusal);
+        var ex = Assert.IsType<ArgumentOutOfRangeException>(_refusal);
+
+        // Asserting on the bound rather than a fixed number, so raising the cap does
+        // not silently turn this into a test of nothing.
+        Assert.Contains($"at most {Basket.MaxQuantityPerLine}", ex.Message);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

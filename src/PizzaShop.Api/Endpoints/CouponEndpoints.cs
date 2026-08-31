@@ -23,11 +23,17 @@ public static class CouponEndpoints
         ICouponEvaluator evaluator,
         ILogger<CouponValidationRequest> logger)
     {
+        // A malformed request is a 400, never a 500. See BasketRequestValidation.
+        if (BasketRequestValidation.Validate(request.Items) is { } invalidBasket)
+        {
+            return invalidBasket;
+        }
+
         Basket basket;
         try
         {
             basket = await Basket.FromLinesAsync(
-                request.Items.Select(i => new BasketLine(i.PizzaId, i.Quantity)),
+                request.Items!.Select(i => new BasketLine(i.PizzaId, i.Quantity)),
                 menu);
         }
         catch (UnknownPizzaException ex)
@@ -40,7 +46,10 @@ public static class CouponEndpoints
         }
         catch (ArgumentOutOfRangeException ex)
         {
-            return Results.Problem(title: "Invalid quantity", detail: ex.Message, statusCode: 400);
+            // Covers both bounds Basket.FromLinesAsync enforces: the quantity on a line
+            // and the number of lines. ex.Message names which, so the caller is told
+            // what to change rather than just that something was wrong.
+            return Results.Problem(title: "Invalid basket", detail: ex.Message, statusCode: 400);
         }
 
         var pricing = await new PricingService(evaluator)
@@ -71,7 +80,7 @@ public static class CouponEndpoints
 
 public sealed record CouponValidationRequest(
     string? CouponCode,
-    IReadOnlyList<BasketLineRequest> Items);
+    IReadOnlyList<BasketLineRequest>? Items);
 
 public sealed record BasketLineRequest(int PizzaId, int Quantity);
 

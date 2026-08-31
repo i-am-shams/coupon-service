@@ -24,6 +24,10 @@ public sealed class PersistenceSteps : IDisposable
     private CouponValidationResponse? _lastValidation;
     private OrderResponse? _orderResponse;
 
+    // Held undeserialised, because the scenario asserts on the status code rather than
+    // on a body it may not have.
+    private HttpResponseMessage? _rawResponse;
+
     // ── Given ─────────────────────────────────────────────────────────────
 
     [Given(@"a coupon ""([^""]*)"" with a redemption limit of (\d+)")]
@@ -99,7 +103,48 @@ public sealed class PersistenceSteps : IDisposable
         }
     }
 
+    [When("I submit a coupon validation with no items property at all")]
+    public async Task WhenValidationWithNoItems()
+    {
+        _factory = new PizzaShopWebApplicationFactory();
+        _client = _factory.CreateClient();
+        _factory.SeedDatabase(
+            pizzas: new[]
+            {
+                new PizzaEntity { Id = 1, Name = "Margherita", Description = "Test pizza", Price = 10.00m },
+            });
+
+        // Raw JSON, because the typed DTO cannot express an *absent* property — and the
+        // absence is the whole point. This is verbatim the body that returned HTTP 500
+        // from the deployed gateway before BasketRequestValidation existed.
+        using var content = new StringContent(
+            """{"couponCode":"PIZZA10"}""", Encoding.UTF8, "application/json");
+
+        _rawResponse = await _client.PostAsync("/api/v1/coupons/validate", content);
+    }
+
     // ── Then ──────────────────────────────────────────────────────────────
+
+    [Then(@"the response status should be (\d+)")]
+    public void ThenResponseStatusShouldBe(int expected)
+    {
+        Assert.NotNull(_rawResponse);
+        Assert.Equal(expected, (int)_rawResponse!.StatusCode);
+    }
+
+    [Then("the response should not be a server error")]
+    public void ThenResponseIsNotAServerError()
+    {
+        Assert.NotNull(_rawResponse);
+
+        // Stated separately from the status assertion on purpose. The contract every
+        // deliverable document makes is that 4xx means the request was wrong and 5xx
+        // means the server was — so a malformed request surfacing as 5xx is a
+        // documentation contradiction, not just an off-by-one status code.
+        Assert.True(
+            (int)_rawResponse!.StatusCode < 500,
+            $"A malformed request must not be reported as a server fault. Got {(int)_rawResponse.StatusCode}.");
+    }
 
     [Then("the coupon should still be valid on the fourth preview")]
     public async Task ThenStillValidOnFourthPreview()
@@ -141,6 +186,7 @@ public sealed class PersistenceSteps : IDisposable
 
     public void Dispose()
     {
+        _rawResponse?.Dispose();
         _client?.Dispose();
         _factory?.Dispose();
     }

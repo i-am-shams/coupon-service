@@ -88,3 +88,19 @@ Feature: Coupon pricing
   Scenario: An order is priced from the server's own data, ignoring client claims
     Given I submit an order claiming a pizza costs 1.00 but the server has it at 10.00
     Then the order total should reflect the server price of 10.00
+
+  # Both scenarios below came from probing the deployed gateway, not from reading the
+  # code. The first returned 500 for a request that was merely malformed; the second
+  # returned 200 and a twenty-billion-euro subtotal.
+
+  Scenario: A request with no items is rejected as a bad request, not a server error
+    When I submit a coupon validation with no items property at all
+    Then the response status should be 400
+    And the response should not be a server error
+
+  Scenario: A basket line quantity above the maximum is rejected
+    Given I have a basket with:
+      | PizzaId | Quantity      |
+      | 1       | 2000000000    |
+    When I price the basket without a coupon expecting it to be refused
+    Then pricing should be refused because the quantity is out of range

@@ -62,6 +62,29 @@ public sealed record BasketItem
 /// </remarks>
 public sealed record Basket
 {
+    /// <summary>
+    /// The most of any one pizza a single line may carry.
+    /// </summary>
+    /// <remarks>
+    /// Without an upper bound the server prices whatever it is handed: a quantity of
+    /// 2,000,000,000 was accepted through the deployed gateway and returned a subtotal of
+    /// €20,000,000,000. Nothing overflowed and no price came from the client, so rule 1
+    /// held — but an order nobody could fulfil is not a valid order, and the figure is
+    /// eventually written to a <c>decimal(18,2)</c> column.
+    /// </remarks>
+    public const int MaxQuantityPerLine = 50;
+
+    /// <summary>
+    /// The most lines a single basket may carry.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="IMenu.GetUnitPriceAsync"/> is one database round trip per line, and for
+    /// an order the whole loop runs inside the redemption transaction against a 5 DTU
+    /// database. An uncapped line count is therefore a cheap way to hold that transaction
+    /// open. The cap bounds it at fifty queries.
+    /// </remarks>
+    public const int MaxLines = 50;
+
     private Basket(IReadOnlyList<BasketItem> items) => Items = items;
 
     public IReadOnlyList<BasketItem> Items { get; }
@@ -82,9 +105,21 @@ public sealed record Basket
         ArgumentNullException.ThrowIfNull(lines);
         ArgumentNullException.ThrowIfNull(menu);
 
-        var items = new List<BasketItem>();
+        // Materialised once: the count is needed before the loop, and re-enumerating a
+        // lazy sequence would run the caller's projection twice.
+        var submitted = lines as IReadOnlyList<BasketLine> ?? lines.ToList();
 
-        foreach (var line in lines)
+        if (submitted.Count > MaxLines)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(lines),
+                submitted.Count,
+                $"A basket may carry at most {MaxLines} lines.");
+        }
+
+        var items = new List<BasketItem>(submitted.Count);
+
+        foreach (var line in submitted)
         {
             // A negative or zero quantity would subtract from the subtotal, which is
             // the same class of problem as accepting a price from the client.
@@ -94,6 +129,15 @@ public sealed record Basket
                     nameof(lines),
                     line.Quantity,
                     $"Quantity for pizza {line.PizzaId} must be at least 1.");
+            }
+
+            // And an unbounded one prices a basket nobody could ever be sent.
+            if (line.Quantity > MaxQuantityPerLine)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(lines),
+                    line.Quantity,
+                    $"Quantity for pizza {line.PizzaId} must be at most {MaxQuantityPerLine}.");
             }
 
             var unitPrice = await menu.GetUnitPriceAsync(line.PizzaId, cancellationToken)

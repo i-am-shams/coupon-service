@@ -27,11 +27,17 @@ public static class OrderEndpoints
         PizzaShopDbContext db,
         ILogger<OrderRequest> logger)
     {
+        // A malformed request is a 400, never a 500. See BasketRequestValidation.
+        if (BasketRequestValidation.Validate(request.Items) is { } invalidBasket)
+        {
+            return invalidBasket;
+        }
+
         Basket basket;
         try
         {
             basket = await Basket.FromLinesAsync(
-                request.Items.Select(i => new BasketLine(i.PizzaId, i.Quantity)),
+                request.Items!.Select(i => new BasketLine(i.PizzaId, i.Quantity)),
                 menu);
         }
         catch (UnknownPizzaException ex)
@@ -41,7 +47,10 @@ public static class OrderEndpoints
         }
         catch (ArgumentOutOfRangeException ex)
         {
-            return Results.Problem(title: "Invalid quantity", detail: ex.Message, statusCode: 400);
+            // Covers both bounds Basket.FromLinesAsync enforces: the quantity on a line
+            // and the number of lines. ex.Message names which, so the caller is told
+            // what to change rather than just that something was wrong.
+            return Results.Problem(title: "Invalid basket", detail: ex.Message, statusCode: 400);
         }
 
         var asOf = DateTimeOffset.UtcNow;
@@ -156,7 +165,7 @@ public static class OrderEndpoints
 
 public sealed record OrderRequest(
     string? CouponCode,
-    IReadOnlyList<BasketLineRequest> Items);
+    IReadOnlyList<BasketLineRequest>? Items);
 
 public sealed record OrderResponse(
     int OrderId,
