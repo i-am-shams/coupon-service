@@ -142,3 +142,130 @@ connection will reach for `SUSER_SNAME()` first, and for a SID-created contained
 it returns `<client-id>@<tenant-id>` rather than the user's name. A working connection
 looks like the wrong principal connected. That is a false alarm worth pre-empting for
 a reviewer, and it is not obvious from the Microsoft documentation.
+
+## Spike 3 — app registrations and the PKCE flow
+
+Created 2026-08-27. Named for the real project, not the spike: they are Day 0
+artifacts per approach.md §7, and renaming them later would mean changing the
+audience in the APIM policy and the client ID baked into the React build.
+
+| Registration | Purpose | Application (client) ID |
+|---|---|---|
+| `coupon-api` | The API. Exposes `Orders.Write`. | `90a27142-cffb-4879-873a-bc0a99112ce7` |
+| `coupon-spa` | The React frontend. Public client, PKCE. | `04a724e0-6bd9-4285-ab7f-b00d2ce30e2c` |
+
+Application ID URI: `api://90a27142-cffb-4879-873a-bc0a99112ce7`.
+Both are single-tenant (`AzureADMyOrg`). `Orders.Write` is granted tenant-wide with
+`consentType: AllPrincipals`, so no user meets a consent prompt.
+
+### `accessTokenAcceptedVersion` was set to 2 before the first token was issued
+
+`api.requestedAccessTokenVersion = 2` on `coupon-api`, set at creation rather than
+after the first failed policy. Without it the v2 endpoint still returns a v1 token
+with `iss = https://sts.windows.net/{tenant}/` — note the trailing slash — and
+`validate-jwt` compares the issuer as an exact string. Setting it first means the
+token that gets decoded is the token the policy will eventually see.
+
+### The SPA platform, not Web
+
+`coupon-spa` has its redirect URI under `spa`, with `web` empty. A Web-platform
+redirect URI rejects the PKCE flow unless a client secret is supplied, which a browser
+cannot hold. The distinction is invisible in the portal until sign-in fails.
+
+### Redirect URIs: production must match the deployed frontend exactly
+
+`http://localhost:5173` is registered now for local development and the spike. It stays.
+
+**The production redirect URI must equal the deployed frontend URL character for
+character** — Entra does exact string matching, with no wildcards and no tolerance for
+a trailing slash. This is precisely why approach.md §6 pins the storage account name
+rather than letting Bicep generate one: the static site URL has to be known *before*
+deployment so the redirect URI can be registered in advance. A generated name would
+mean the URL is only knowable after the deploy that needs it.
+
+**One registration holds both URIs.** Phase E *adds* the production URI alongside the
+localhost one; it does not replace it. Recorded explicitly so it is not rediscovered
+under time pressure — the failure mode is deleting the localhost URI on the assumption
+that a registration has one redirect URI, and losing local development for the rest of
+the project.
+
+### The reviewer test account must be a member, not a guest
+
+Decided 2026-08-27. approach.md §10 assumption 6 says a pre-created test account will
+be documented in the README; it does not currently say what kind. It must be a
+**member** of the tenant.
+
+**Half of the original reasoning for this turned out to be wrong, and the decision
+survives on the other half.** See "Spike 3 — observed token claims" below: a guest's
+`preferred_username` came back as the clean `user@example.com`, *not* the
+`#EXT#` form. The mangling is a directory artifact, not a token claim.
+
+What still argues for a member account: consent. The tenant-wide `AllPrincipals` grant
+covers the application, but a guest's first sign-in can still surface prompts that have
+not been cleared in advance, and approach.md §10 assumption 6 promises a reviewer who
+can simply sign in. A member account removes that variable at no cost. Guest identities
+also carry the `idp` claim and no `upn`, so any future assumption about `upn` being
+present would hold for a member and fail for a guest.
+
+**Action:** approach.md §10 assumption 6 needs updating to say "member" when that
+document is next revised. Flagged rather than edited, because approach.md is the
+approved design document and changes to it should be deliberate.
+
+### Spike 3 — observed token claims
+
+Verified 2026-08-27. Authorization code + PKCE via `@azure/msal-browser` 3.28.1, signing
+in as the tenant's own `#EXT#` guest identity. Every value below was read off a decoded
+token, not predicted. The token was decoded in the browser — not pasted into jwt.ms,
+which would mean handing a live access token to a third party.
+
+#### The four assertions, as observed
+
+| Check | Result | Observed |
+|---|---|---|
+| `aud` is this API | PASS | `90a27142-cffb-4879-873a-bc0a99112ce7` — the **bare client ID** |
+| `iss` is the v2 endpoint | PASS | `https://login.microsoftonline.com/8edd202c-.../v2.0` |
+| `scp` contains `Orders.Write` | PASS | `scp = Orders.Write` |
+| `roles` absent (delegated flow) | PASS | absent |
+
+#### `aud` is the bare client ID, not the `api://` URI
+
+This is the value the APIM policy must carry, and it is not interchangeable with the
+application ID URI. Entra can issue either form depending on token version and how the
+scope was requested; **this tenant, for a v2 token, issues the bare GUID**. Writing
+`api://90a27142-...` into `<audience>` instead would produce a 401 that reads as a
+broken policy rather than a one-token-mismatch.
+
+`ver` came back as `2.0` and `iss` carries the `/v2.0` suffix with no trailing slash,
+confirming that setting `requestedAccessTokenVersion = 2` at creation did its job. A v1
+token would have carried `https://sts.windows.net/{tenant}/` — trailing slash included.
+
+The policy written from these values is `infra/policies/orders-validate-jwt.xml`.
+
+#### The `#EXT#` guest read: partly right, and wrong on the claim that mattered
+
+Recorded plainly because the wrong half was the half being relied on.
+
+| Prediction | Outcome |
+|---|---|
+| PKCE flow works normally for a guest | **Held.** No friction, no extra prompt. |
+| `iss` and `tid` are the resource tenant, not the MSA's home tenant | **Held.** `tid = 8edd202c-...`. |
+| `idp` present where a member's token omits it | **Held.** `idp = live.com`. |
+| `oid` is the stable identifier | **Held.** `oid = fe66ec40-...`, matching the directory object. |
+| `preferred_username` arrives `#EXT#`-mangled | **Wrong.** It is the clean `user@example.com`. |
+
+The `#EXT#` form — `user_example.com#EXT#@example.onmicrosoft.com` — is
+real, and it is what `az ad signed-in-user show` returns and what the SQL server's Entra
+admin login holds. But it is a **directory** artifact. The v2 token carries the user's
+actual sign-in address instead.
+
+The practical consequence is the opposite of what was assumed: matching a directory UPN
+against a token's `preferred_username` will fail *because they differ*, not because the
+token is mangled. Neither is a safe key. `oid` is, and `upn` is absent from this token
+altogether.
+
+#### Token lifetime is 82 minutes, not 60
+
+`CLAUDE.md` says tokens last one hour. Observed lifetime was **82 minutes** — Entra
+randomises access token lifetime between roughly 60 and 90 minutes to avoid fleets of
+clients re-authenticating in lockstep. The debugging heuristic still holds (a call that
+worked and now returns 401 is probably an expired token); the exact number does not.

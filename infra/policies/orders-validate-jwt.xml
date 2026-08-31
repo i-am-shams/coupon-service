@@ -1,0 +1,51 @@
+<!--
+    Operation policy for POST /orders.
+
+    Every value below was copied from a decoded token, not from an example. See
+    docs/decisions.md, "Spike 3 — observed token claims". validate-jwt compares
+    the issuer and audience as exact strings, so a plausible-looking value that
+    was never observed produces a 401 that reads as a broken policy.
+
+    Placeholders use __NAME__ rather than {{NAME}}: double braces are APIM's own
+    named-value syntax and the policy would be rejected at save time.
+-->
+<policies>
+    <inbound>
+        <base />
+        <validate-jwt
+            header-name="Authorization"
+            failed-validation-httpcode="401"
+            failed-validation-error-message="Unauthorized. A valid access token with the Orders.Write scope is required to place an order.">
+            <openid-config url="https://login.microsoftonline.com/__TENANT_ID__/v2.0/.well-known/openid-configuration" />
+            <issuers>
+                <!-- Observed: the v2 issuer, no trailing slash. A v1 token would
+                     carry https://sts.windows.net/__TENANT_ID__/ instead — which is
+                     why coupon-api sets requestedAccessTokenVersion = 2. -->
+                <issuer>https://login.microsoftonline.com/__TENANT_ID__/v2.0</issuer>
+            </issuers>
+            <audiences>
+                <!-- Observed: the BARE client ID of coupon-api, not the
+                     api://<guid> application ID URI. This tenant issues the bare
+                     GUID for a v2 token. Do not "correct" this to the api:// form. -->
+                <audience>__API_CLIENT_ID__</audience>
+            </audiences>
+            <required-claims>
+                <!-- Delegated flow: the caller's permission arrives in scp, and
+                     roles is absent. A required-claims block matching roles would
+                     never fire for this flow. -->
+                <claim name="scp" match="any" separator=" ">
+                    <value>Orders.Write</value>
+                </claim>
+            </required-claims>
+        </validate-jwt>
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>
