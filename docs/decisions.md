@@ -1107,6 +1107,79 @@ not knowable until the storage account exists.
 
 **Action:** approach.md §7's Day 0 list should say so explicitly. Flagged, not edited.
 
+### Day 0: the redirect URIs must be on the SPA platform, not publicClient and not web
+
+Recorded because this was got wrong in practice while setting the project up, and the
+failure is silent until sign-in. Anyone reproducing the Day 0 steps will reach for the same
+wrong platform.
+
+The required end state on `coupon-spa`:
+
+    spa           = ["http://localhost:5173",
+                     "https://stcouponsvclabdtjori.z29.web.core.windows.net"]
+    publicClient  = []
+    web           = []
+
+Both URIs under `spa`, no trailing slashes, and the localhost one kept alongside the
+deployed one rather than replaced.
+
+**Why `spa` and not `publicClient`.** They look interchangeable — both are "public client"
+platforms in the sense that neither holds a secret — and Entra will happily accept a
+browser origin under `publicClient`. It then fails at sign-in, because the two platforms
+differ in something invisible from the registration: **Entra only enables CORS on the token
+endpoint for redirect URIs registered under `spa`.** A browser redeeming an authorization
+code against `/token` from a `publicClient` URI is blocked by the browser itself. The
+`publicClient` platform is for native and mobile clients, which redeem their code from a
+process that has no origin and no CORS to satisfy.
+
+**Why not `web`.** The `web` platform expects a confidential client and requires a client
+secret to redeem the authorization code. A browser cannot hold a secret — which is the
+entire reason this project uses PKCE — so a `web` redirect URI rejects the flow. This is
+already recorded under spike 3; the point here is that all three platforms exist, all three
+accept the same string, and only one of them works.
+
+**How to set it, and the two ways it goes wrong.**
+
+`az ad app update --set spa.redirectUris=...` does not work: it fails with
+`Couldn't find 'spa' in ''` when the platform object does not already exist, because
+`--set` walks a path into an absent node rather than creating it.
+`--public-client-redirect-uris` writes to the wrong platform entirely, and does so
+successfully, which is worse.
+
+The route that works is a Graph PATCH with a body file:
+
+    az rest --method PATCH \
+      --uri "https://graph.microsoft.com/v1.0/applications/<OBJECT-ID>" \
+      --headers "Content-Type=application/json" \
+      --body "@spa-redirect-uris.json"
+
+Two details in that command:
+
+- It takes the application's **object ID**, not its application (client) ID. Microsoft
+  Graph addresses the directory object; `az ad app show --id <appId> --query id` returns it.
+- A PATCH **merges**. Sending only `spa` sets the SPA URIs and leaves anything already under
+  `publicClient` in place, so a registration that was written to the wrong platform first
+  ends up with the URIs on both. The body must empty the platforms it is not using:
+
+      {
+        "spa":          { "redirectUris": ["http://localhost:5173", "https://.../"] },
+        "publicClient": { "redirectUris": [] },
+        "web":          { "redirectUris": [] }
+      }
+
+Graph returns 204 with no body on success, so the write must be verified by reading the
+registration back rather than by the command's exit code.
+
+**A note on shells.** The PATCH fails under PowerShell if the URI is unquoted, because
+PowerShell parses the parentheses in the Graph URL. This is the same class of problem as
+the `${APIM}.azure-api.net` brace rule in `CLAUDE.md`. Quote the URI, or run it from bash.
+
+**Action:** approach.md §7's Day 0 list currently says only "Two Entra ID app
+registrations (the API and the React app)". It should say that the React app's redirect
+URIs go on the SPA platform, and that the deployed origin is added once the storage account
+exists — the origin is not knowable before then, which is why this Day 0 item is completed
+in two sittings rather than one. Flagged, not edited.
+
 ### The frontend build fails on a missing variable rather than shipping `undefined`
 
 `vite.config.ts` checks all five `VITE_` variables in production mode and throws. A missing
