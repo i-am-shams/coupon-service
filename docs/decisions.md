@@ -57,3 +57,88 @@ looks plausible and silently fails.
 
 Passwordless SQL is achievable inside a pipeline with no tenant-admin involvement.
 The approach document's §6 stands. No fallback to SQL authentication needed.
+
+### Verified end to end 2026-08-27
+
+The half of the spike that was still open — whether the App Service can actually
+*authenticate* as that contained user — is now closed. A throwaway minimal API
+(`spike/sql-probe/`) deployed to `appspike98843` opened a connection and returned:
+
+    {
+      "ok": true,
+      "login": "af355f87-3f9a-4bb3-b8f9-ea1dc1f2f687@8edd202c-5474-4669-9b35-253da7a27cd2",
+      "user": "appspike98843",
+      "database": "spikedb",
+      "isDataReader": true, "isDataWriter": true, "isDdlAdmin": true
+    }
+
+The connection string carries no credential and no client ID:
+
+    Server=tcp:sqlspike49500.database.windows.net,1433;Initial Catalog=spikedb;
+    Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;
+
+`Active Directory Default` resolves the system-assigned managed identity on App
+Service with nothing else configured. This is the string Bicep will set on the real
+App Service in phase C.
+
+#### `SUSER_SNAME()` returns the client ID, not the user name
+
+Worth knowing before it looks like a bug. Because the user was created from a SID
+rather than `FROM EXTERNAL PROVIDER`, SQL never asked Entra for a display name, so
+the login surfaces as `<client-id>@<tenant-id>`. `USER_NAME()` returns the expected
+`appspike98843`. Any diagnostic that checks the identity should read `USER_NAME()`;
+`SUSER_SNAME()` on its own reads as if the wrong principal connected.
+
+The role membership check was worth including for the same reason: it proves the
+`db_datareader` / `db_datawriter` grants landed, not merely that the login succeeded.
+
+#### Two things not to carry into the real template
+
+- `httpsOnly` is `false` on the spike App Service. The real one must set it true.
+- The spike SQL server has three overlapping firewall rules pinning a home IP
+  (`AllowMe`, `AllowMe2`, `AllowMyRange`). The real template needs `AllowAzure` only.
+
+## Tooling notes
+
+### The Azure DevOps MCP server's PAT mode expects a pre-encoded credential
+
+Undocumented; found by testing. `--authentication pat` reads `PERSONAL_ACCESS_TOKEN`
+and passes the value **straight through as the HTTP Basic credential without encoding
+it**. So the variable must hold the base64 of `":" + <pat>`, not the raw token.
+
+A raw PAT there produces `401` on every call while the same PAT returns `200` against
+the REST API directly — which reads as a broken token rather than a wrongly-shaped
+environment variable.
+
+    $pat = [Environment]::GetEnvironmentVariable('PERSONAL_ACCESS_TOKEN','User').Trim()
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":" + $pat))
+    [Environment]::SetEnvironmentVariable('PERSONAL_ACCESS_TOKEN','User', $b64)
+
+Context for why a PAT at all: the `khalid-shams` organisation is MSA-backed and returns
+no `X-VSS-ResourceTenant`, so `--authentication azcli` fails with `TF400813`. The
+`az login` identity is an Entra guest in tenant `8edd202c`, which Azure DevOps maps to
+a different identity than the MSA that owns the organisation. See `docs/reminders.md`
+for the expiry consequence.
+
+### App Service cold start after a zip deploy is ~33 seconds
+
+Measured on the spike: the deployment reported `RuntimeSuccessful` while the container
+was still warming, and a request 44 seconds before the startup probe passed got the
+stock welcome page and a `404` — against an app that was entirely healthy.
+
+**Consequence for the pipeline.** The smoke-test stage must poll with a retry loop and
+an overall timeout, not make a single call. A single call placed straight after the
+deploy stage will fail intermittently, and it will fail in the way most likely to be
+misread — as a routing or policy fault rather than a timing one.
+
+### The `SUSER_SNAME()` finding belongs in the deliverable documentation
+
+Not just in this log. It is recorded above under spike 1, and it should also appear in
+the final `docs/authentication.md` (or `docs/architecture.md`, wherever the managed
+identity path is described).
+
+The reason it earns space in a deliverable: anyone diagnosing a managed identity SQL
+connection will reach for `SUSER_SNAME()` first, and for a SID-created contained user
+it returns `<client-id>@<tenant-id>` rather than the user's name. A working connection
+looks like the wrong principal connected. That is a false alarm worth pre-empting for
+a reviewer, and it is not obvious from the Microsoft documentation.

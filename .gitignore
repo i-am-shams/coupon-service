@@ -487,3 +487,4 @@ infra/params.local.json
 **/secrets.ps1
 *.pdf
 spike-vars.ps1
+spike/

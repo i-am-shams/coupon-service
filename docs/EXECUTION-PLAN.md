@@ -61,13 +61,36 @@ that the gateway, the token audience, and CORS all need work at once.
 |---|---|---|
 | **A** | Domain model, `ICouponEvaluator`, pricing rules, BDD scenarios. No Azure, no database. | — |
 | **B** | EF Core, migrations, `GET /menu` endpoint, structured logging, health checks. Local only. | A |
-| **C** | Bicep: resource group, App Service, SQL, APIM, storage, App Insights. Pipeline stages 1–4. **Deploy `/menu` through the gateway.** | B, spikes 1–2 |
+| **C** | Bicep: resource group, App Service, SQL, APIM, storage, App Insights. Pipeline stages 1–4, with the smoke test polling rather than calling once — see below. **Deploy `/menu` through the gateway.** | B, spikes 1–2 |
 | **D** | Coupon validate and order endpoints. `validate-jwt` on orders. Entra wiring. | C, spike 3 |
 | **E** | React frontend, MSAL, CORS policy, deploy to storage. | D |
 | **F** | Smoke tests, README, documentation, test account, hardening. | E |
 
 **Phase C is the one that overruns.** Budget generously and start it earlier than feels
 comfortable.
+
+### The smoke test polls; it does not call once
+
+The deploy stage returns `RuntimeSuccessful` while the container is still starting.
+Measured on spike 1: an App Service cold start after a zip deploy took **~33 seconds**,
+and a request made before the startup probe passed got the stock welcome page and a
+`404` from a perfectly healthy app.
+
+So the smoke-test stage retries against an overall timeout — poll every few seconds up
+to roughly 120s, fail only when the budget is exhausted:
+
+```bash
+deadline=$((SECONDS + 120))
+until curl -fsS "$GATEWAY/api/v1/menu" -H "Ocp-Apim-Subscription-Key: $KEY" | grep -q Margherita; do
+  if [ $SECONDS -ge $deadline ]; then echo "smoke test timed out after 120s"; exit 1; fi
+  sleep 5
+done
+```
+
+A single call here fails intermittently, and it fails in the way most likely to be
+misread — a `404` reads as a routing or policy fault, sending you to the APIM
+configuration when the only problem was timing. The same retry applies to each of the
+three policy assertions in §7 of the approach document.
 
 ---
 
