@@ -398,8 +398,15 @@ on the 5xx rate is declared in Bicep.
 .NET 8. Reqnroll is the maintained continuation by the original author, with the same Gherkin
 syntax.
 
-Scenarios run against the API through `WebApplicationFactory<Program>`, so they exercise real
-routing, model binding, and status codes rather than calling objects directly.
+**Fifteen scenarios, at two levels.** Eight drive `PricingService` and `CouponEvaluator`
+directly, because the rules are pure and a rule is best tested without an HTTP round trip in
+front of it. The other seven run against the API through `WebApplicationFactory<Program>`, so
+they exercise real routing, model binding, status codes and the database — everything an
+endpoint does that a direct call would skip.
+
+Which level a scenario belongs at is decided by what it is claiming. "A discount never exceeds
+the subtotal" is arithmetic and needs no server. "An order redeems exactly one use of a coupon"
+is a claim about a transaction and cannot be made anywhere but through the endpoint.
 
 **The database is swapped for SQLite in-memory — specifically SQLite, not the EF Core in-memory
 provider.** The EF provider supports neither `ExecuteUpdateAsync` nor transactions, which are
@@ -419,16 +426,30 @@ The scenarios that matter most:
 - An order is priced from the server's own data, ignoring whatever the client claims.
 - Previewing a coupon three times does not consume a redemption.
 - Each rejection reason produces the right outcome.
-- A coupon at its redemption limit is refused, and the order is created at full price.
+- **An order carrying a valid coupon is discounted, increments `UsageCount` by exactly one,
+  and writes one `CouponRedemptions` row against that order.** This is the brief's functional
+  goal at the level the brief states it — the coupon affecting the final order price — and it
+  is the only scenario that exercises rule 4's atomic `UPDATE` at all.
+- An order against a coupon at its redemption limit is still created, at full price, with
+  `couponApplied: false` and `RedemptionLimitReached`, and consumes nothing.
 - A request with no `items` property is a 400 and **not a server error** — asserted separately
   from the status code, because "not 5xx" is the contract these documents make and a status
   equality check alone would not say so.
 - A quantity above the maximum is refused, asserting against `Basket.MaxQuantityPerLine` rather
   than a literal, so raising the cap cannot silently turn the scenario into a test of nothing.
 
-Sequential exhaustion is covered. The parallel case is not: a multi-threaded timing assertion
-inside a deployment pipeline is flaky, and a flaky test is worse than no test. The implementation
-is safe regardless, because the update is atomic.
+**What the redemption scenarios do and do not establish.** They establish that the redemption
+runs, that it moves the counter by one, that the audit row is written, and that an exhausted
+coupon is refused without consuming anything. Both were mutation-checked rather than trusted:
+making `TryRedeemAsync` claim a redemption without performing the `UPDATE` fails the first, and
+dropping the audit-row write fails it too, so neither is a scenario that would pass against a
+broken implementation.
+
+They do not establish the *concurrent* case — two callers racing for the last redemption. That
+is deliberate: a multi-threaded timing assertion inside a deployment pipeline is flaky, and a
+flaky test is worse than no test. The implementation is safe regardless, because the update is a
+single statement with the limit in its `WHERE` clause. The coverage is the limitation, not the
+behaviour, and it is listed as one in [assumptions.md](assumptions.md) §3.
 
 Scenarios are written in business language; the mapping from a readable step to a rejection
 reason lives in the step definition, so changing the wording of a message does not break a test.

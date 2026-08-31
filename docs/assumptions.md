@@ -113,10 +113,26 @@ with a short firewall window, are the production answer.
 ### 2. Redemption concurrency is correct but only sequentially tested
 
 The single atomic `UPDATE ... WHERE UsageCount < RedemptionLimit` is safe under concurrency with
-no locking. The BDD scenarios cover sequential exhaustion. The parallel case is not tested,
-because a multi-threaded timing assertion inside a deployment pipeline is flaky — and a flaky test
-is worse than no test. The implementation is safe regardless; the *coverage* is the limitation,
-not the behaviour.
+no locking.
+
+**Sequentially it is covered.** Two scenarios place real orders through the endpoint: one
+redeems a coupon and asserts that `UsageCount` moved by exactly one and that a
+`CouponRedemptions` row was written against that order; the other orders against a coupon at
+its limit and asserts the order is still created at full price, with
+`RedemptionLimitReached`, consuming nothing. Both were mutation-checked — breaking the `UPDATE`
+fails the first, dropping the audit row fails it too.
+
+**This was previously claimed and not true**, which is worth recording rather than quietly
+correcting. Until 2026-08-30 the suite contained no scenario that redeemed a coupon at all: the
+pricing scenarios never reached the order endpoint, and the two that did carried no coupon. So
+the most important invariant in the design had no test, while this document and
+[architecture.md](architecture.md) §8 both stated it had one. The claim was written from the
+intent rather than from the feature file, and nothing made the two meet — the same shape as the
+`nvarchar(50)` that lived in the schema and nowhere else.
+
+**The parallel case is still not tested**, because a multi-threaded timing assertion inside a
+deployment pipeline is flaky — and a flaky test is worse than no test. The implementation is
+safe regardless; that *coverage* is the limitation, not the behaviour.
 
 ### 3. Rate limiting is per subscription, not per user
 

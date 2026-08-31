@@ -1599,3 +1599,52 @@ gateway is not an `ApiError`, and the catch fell back to `String(e)` — which r
 of the stack. Both catches now go through one `describeFailure`, which keeps the gateway's
 own message and correlation ID where there is one and says something a person can act on
 where there is not.
+
+### No test ever redeemed a coupon, and two documents said otherwise
+
+The largest of the nine findings, and the one a reviewer was most likely to check.
+
+The suite had thirteen scenarios. Exactly two reached `POST /orders`: one carrying
+`couponCode: null`, one carrying an over-long code and expecting a 400. So
+`CouponRepository.TryRedeemAsync` was never invoked by any test. `UsageCount` was asserted
+only as *unchanged*, by the preview scenario whose whole point is that it stays at zero.
+
+Nothing covered:
+
+- an order actually being discounted by a coupon — the brief's functional goal, at the
+  level the brief states it
+- `UsageCount` incrementing — rule 4, the atomic `UPDATE`, the invariant this design leans
+  on hardest
+- the `CouponRedemptions` audit row
+- the `strategy.ExecuteAsync` block and the transaction inside it, which is the most
+  intricate code in the solution and was written to fix a real defect
+
+Meanwhile `architecture.md` §8 listed "A coupon at its redemption limit is refused, and the
+order is created at full price" among the scenarios that matter most, and `assumptions.md`
+§3.2 said "The BDD scenarios cover sequential exhaustion". Neither was true. The `MAXED`
+scenario prices a basket; it places no order and exhausts nothing.
+
+**How the claim came to be false is the useful part.** It was written from the intent — the
+design *does* handle sequential exhaustion, and the evaluator scenario for
+`RedemptionLimitReached` does exist — and nothing forced it to be checked against the
+feature file. That is the same shape as the `nvarchar(50)` recorded in phase F: a fact
+stated in one place, relied on from another, with no path between them.
+
+Two scenarios now close it, both through the endpoint because a claim about a transaction
+cannot be made anywhere else:
+
+- an order with a valid coupon returns 201, is discounted, moves `UsageCount` by exactly
+  one, and writes one `CouponRedemptions` row against that order
+- an order against a coupon at its limit returns 201 at full price with
+  `couponApplied: false` and `RedemptionLimitReached`, and consumes nothing
+
+**Mutation-checked, because a passing test proves nothing until it has been seen to fail** —
+which is the explicit lesson of the EF in-memory provider decision earlier in this log,
+where a green suite was hiding a 500 on every order carrying a coupon. Making
+`TryRedeemAsync` return `true` without performing the `UPDATE` fails the first scenario;
+deleting the audit-row write fails it as well. Both were run, both failed, and the code was
+restored.
+
+`architecture.md` §8 also claimed "Scenarios run against the API through
+`WebApplicationFactory<Program>`" as a blanket statement. It was true of five of thirteen,
+and is now true of seven of fifteen. It says so, and says how the level is chosen.

@@ -105,6 +105,33 @@ Feature: Coupon pricing
     When I price the basket without a coupon expecting it to be refused
     Then pricing should be refused because the quantity is out of range
 
+  # The two scenarios below cover the one thing nothing covered before: an order that
+  # actually redeems a coupon. Every other scenario either priced a basket without going
+  # near the order endpoint, or placed an order carrying no coupon - so rule 4's atomic
+  # redemption, the CouponRedemptions audit row and the transaction wrapping them had no
+  # test at all, while architecture.md and assumptions.md both stated they did.
+  #
+  # This is the brief's functional goal at the level the brief states it: the coupon
+  # affecting the final order price, not just a priced basket.
+
+  Scenario: An order with a valid coupon is discounted and consumes one redemption
+    Given a 10% coupon "ORDER10" with a redemption limit of 5 and a pizza costing 10.00
+    When I place an order for 3 of that pizza with coupon "ORDER10"
+    Then the response status should be 201
+    And the order should report the coupon as applied
+    And the order total should be 27.00 with a discount of 3.00
+    And the coupon usage count should be 1
+    And a redemption should be recorded against that order
+
+  Scenario: An order against an exhausted coupon is created at full price
+    Given a 10% coupon "USEDUP" already used 2 times out of 2 and a pizza costing 10.00
+    When I place an order for 3 of that pizza with coupon "USEDUP"
+    Then the response status should be 201
+    And the order should report the coupon as not applied with reason "RedemptionLimitReached"
+    And the order total should be 30.00 with a discount of 0.00
+    And the coupon usage count should be 2
+    And no redemption should be recorded
+
   # Found by an adversarial review, and it is the same defect class as the missing
   # items array: a schema constraint with no matching request validation. The code
   # evaluated as NotFound, was written onto the order anyway, and met nvarchar(50)
