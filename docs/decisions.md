@@ -881,7 +881,29 @@ the same API-scope policy. That a request with no token is rejected by `validate
 specifically — assertion 3 asserts on the policy's own message naming `Orders.Write`,
 which neither the subscription-key check nor the backend can produce.
 
-**What it does not prove, and this is the honest limit.** No automated assertion here
+**Confirmed after the fact, from Application Insights.** The smoke assertions alone cannot
+say *which* token `validate-jwt` inspected, because both possibilities return 401. The
+gateway's own token is app-only and carries no `scp`, so a policy reading the Authorization
+header would fail on the required claim and look identical from outside.
+
+APIM records the validation failure reason, and it discriminates:
+
+    placeOrder | TokenNotPresent at validate-jwt | JWT not present.
+    placeOrder | Invalid JWT. at validate-jwt    | IDX12741: JWT must have three segments
+
+The first is the no-token assertion. "JWT not present" means an **empty** value was
+validated — the caller sent no Authorization header, so `callerToken` was empty. Had the
+policy read the header, it would have found the gateway's token there: a real, well-formed,
+three-segment JWT, failing on a missing claim rather than on absence.
+
+The second is the malformed-token assertion, rejecting the literal string
+`not-a-real-token` for having no segments. The gateway's token has three. Again, only
+explicable if the value under validation came from the caller.
+
+So both tokens are confirmed: the caller's is what `validate-jwt` inspects, and the
+gateway's is what reaches the backend.
+
+**What is still not proven, and this is the honest limit.** No automated assertion here
 covers the positive case: a *valid* caller token producing a 201. That needs a real user
 token, which needs an interactive PKCE sign-in, which cannot be done from a pipeline agent
 without storing a credential. Until phase E puts MSAL in front of this endpoint, the
