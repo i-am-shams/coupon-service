@@ -5,6 +5,30 @@ const STORAGE_KEY = 'pizzashop.basket';
 const COUPON_KEY = 'pizzashop.couponCode';
 
 /**
+ * Mirrors of bounds the server owns. The server remains the authority — it rejects a
+ * request that breaks either of these with a 400 whatever the client does — and these
+ * exist so the UI cannot construct a request that is guaranteed to fail.
+ *
+ * Both were reachable from the page before they existed. The + button incremented without
+ * limit, so a customer could reach 52 and get a 400 whose text was `ArgumentOutOfRange`'s
+ * own "(Parameter 'lines') Actual value was 52.", and the coupon field accepted any
+ * length, so a 51-character code produced a 400 from `CouponCodeRules.MaxLength`.
+ *
+ * They are copies, and a copy can drift. That is accepted here for the same reason the
+ * server still validates: the copy governs what the UI lets you build, never what the
+ * server accepts. If it drifts low the UI is merely stricter than it needs to be; if it
+ * drifts high the server still refuses.
+ *
+ *   MAX_QUANTITY_PER_LINE  <- PizzaShop.Ordering.Basket.MaxQuantityPerLine
+ *   COUPON_CODE_MAX_LENGTH <- PizzaShop.Coupons.CouponCodeRules.MaxLength
+ *
+ * `Basket.MaxLines` (50) has no mirror because the menu has eight pizzas and one line per
+ * pizza, so the UI cannot reach it.
+ */
+export const MAX_QUANTITY_PER_LINE = 50;
+export const COUPON_CODE_MAX_LENGTH = 50;
+
+/**
  * The order in progress — basket and coupon code — persisted across the sign-in redirect.
  *
  * MSAL's redirect flow navigates away to login.microsoftonline.com and back, which
@@ -42,13 +66,20 @@ export function useBasket() {
     }
   });
 
-  const [couponCode, setCouponCode] = useState<string>(() => {
+  const [couponCode, setCouponCodeState] = useState<string>(() => {
     try {
-      return sessionStorage.getItem(COUPON_KEY) ?? '';
+      return (sessionStorage.getItem(COUPON_KEY) ?? '').slice(0, COUPON_CODE_MAX_LENGTH);
     } catch {
       return '';
     }
   });
+
+  // Truncated here as well as by the input's maxLength, because maxLength does not
+  // constrain a paste on every browser and does not constrain sessionStorage at all.
+  const setCouponCode = useCallback(
+    (code: string) => setCouponCodeState(code.slice(0, COUPON_CODE_MAX_LENGTH)),
+    [],
+  );
 
   useEffect(() => {
     try {
@@ -67,10 +98,13 @@ export function useBasket() {
     }
   }, [couponCode]);
 
+  // Clamped here rather than at the call site so every caller gets it — the stepper is
+  // the only one today, and the next one should not have to remember.
   const setQuantity = useCallback((pizzaId: number, quantity: number) => {
+    const clamped = Math.min(Math.max(0, Math.trunc(quantity)), MAX_QUANTITY_PER_LINE);
     setLines((current) => {
       const others = current.filter((l) => l.pizzaId !== pizzaId);
-      return quantity > 0 ? [...others, { pizzaId, quantity }] : others;
+      return clamped > 0 ? [...others, { pizzaId, quantity: clamped }] : others;
     });
   }, []);
 
@@ -83,7 +117,7 @@ export function useBasket() {
   // after a completed order would be silently reapplied to the next one.
   const clear = useCallback(() => {
     setLines([]);
-    setCouponCode('');
+    setCouponCodeState('');
   }, []);
 
   const itemCount = lines.reduce((sum, l) => sum + l.quantity, 0);

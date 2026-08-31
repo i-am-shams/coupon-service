@@ -1461,3 +1461,141 @@ because they look like evidence. The check that found the extra seven was mechan
 extract every identifier the documents quote, grep the source for each — and it takes
 seconds. It belongs in the same category as the `$(macro)` cross-check recorded above:
 cheap, boring, and it finds things reading does not.
+
+## Phase G — final audit against the brief (2026-08-30)
+
+A full audit of the delivered system against the assignment brief as written, rather than
+against the plan. Nine findings, all accepted. This section records them as they were
+fixed.
+
+The audit was done by driving the deployed application in a real browser, probing the
+gateway, reading the deployed APIM policies and Easy Auth configuration back from ARM, and
+checking the Azure resource timeline — not by reading the repository. Everything below was
+found that way, which is the same lesson as the three frontend defects in phase F and the
+reason it was done that way again.
+
+### The restored-preview effect fired on the first keystroke, not on the redirect
+
+The worst of the nine, because it is the first thing anybody sees.
+
+Phase F added an effect that re-previews a coupon code restored from `sessionStorage` after
+the sign-in redirect, so a customer coming back does not see a filled-in coupon field with
+no figure beside it. It had no signal for "this is the return leg", so it tested the state
+instead: menu loaded, a code present, a non-empty basket, and a `useRef` to make it happen
+once.
+
+**That condition is also true the moment somebody types the first character of a code.** So
+the app fired a preview for a one-character code, the server correctly answered `NotFound`,
+and a red rejection panel appeared underneath a coupon the customer was still typing. The
+ref then guaranteed it never corrected itself: the panel sat there reading
+**"Not applied: NotFound"** while the field read `PIZZA10` — a code that works. Confirmed
+from the other side in Log Analytics, which has the request:
+`Coupon validation: code=P valid=false reason="NotFound"`.
+
+A reviewer following the README, which tells them to try `PIZZA10`, met this within seconds
+of loading the page.
+
+**The fix is to have the signal rather than infer it.** `handleRedirectPromise()` returns
+non-null exactly when MSAL has just consumed an authorization response out of the URL, and
+null on an ordinary load. `main.tsx` passes that to `App` as `returnedFromRedirect`, and the
+effect returns early without it.
+
+**The general point, and it is the same one as `CouponCodeRules`:** a condition that is
+*correlated* with the thing you mean is not the thing you mean. "There is a code and a
+basket" correlates with "we came back from sign-in" only until somebody types. Deriving a
+fact you could be handed is how you get a defect that is invisible to everyone who already
+knows what the code was for.
+
+Proven rather than asserted, because "it should only fire on the redirect" is exactly the
+kind of claim that is easy to believe and cheap to check. Driving the app with the coupon
+code typed one character at a time: **zero requests during typing**, one when Check is
+pressed. And the round trip it exists for still works — sign in with a basket and a code,
+come back, and the verdict is restored automatically.
+
+### The page had no total until you asked about a coupon
+
+The brief names four things the customer must be able to do, and the fourth is "view the
+calculated total price". With items in the basket and the coupon field untouched, the word
+"total" did not appear anywhere on the page. The only two routes to one were the coupon
+preview and the order confirmation — so seeing what your basket cost meant asking a
+question about a coupon you might not have.
+
+And the obvious workaround was a trap. Pressing **Check** with an empty field sent an empty
+`couponCode`, which the endpoint answers with `NotFound` — the right answer to "is the empty
+string a valid coupon?" and the wrong thing to show somebody who only wanted their total. It
+rendered as a red rejection panel under an empty input.
+
+There is now a **Your basket** block carrying subtotal, discount and total, present as soon
+as the basket is non-empty and updated whenever it changes.
+
+**Where the figures come from matters more than the block does.** They are the server's.
+`POST /coupons/validate` with no code is exactly "price this basket", and rule 2 makes it
+read-only — it consumes no redemption and writes nothing — so calling it on every basket
+change has no consequence beyond a request. The alternative was to multiply the menu price
+by the quantity in the browser, which would have been one line and would have put a money
+calculation on the client for the first time. Rule 1 is about what crosses the wire, so it
+would not strictly have broken it; but `client.ts` claims "every money figure the UI
+displays comes back from a server response", and that claim is worth more than the request.
+
+The call is debounced at 350ms, because the stepper is clicked in bursts, and sequenced,
+because a slow earlier response must not overwrite a newer one and leave the customer
+looking at the total for a basket they have moved on from.
+
+Two smaller decisions inside it:
+
+- **Check with an empty field no longer asks the server anything.** There is nothing to
+  check and nothing to reject; the total is already on screen. It clears any stale verdict
+  and returns.
+- **A coupon verdict is cleared when the basket changes.** It was priced against a basket
+  that no longer exists, and a stale discount displayed beside a fresh subtotal is the same
+  failure as the coupon code that vanished across the redirect in phase F — the customer is
+  shown a number that is not the number they will be charged. They press Check again, which
+  is the flow the README already describes for watching `SPEND50` cross its threshold.
+
+### `ArgumentOutOfRangeException.Message` was reaching the browser
+
+The `+` button incremented without limit. Clicking it past fifty produced a 400 from
+`Basket.MaxQuantityPerLine` — correct — whose body the frontend displayed verbatim:
+
+```
+Quantity for pizza 1 must be at most 50. (Parameter 'lines')
+Actual value was 52.
+```
+
+The first sentence is for the customer. The rest is .NET composing
+`ArgumentOutOfRangeException.Message` out of the message, the parameter name and the actual
+value, and it names a parameter of a method the customer has never heard of.
+
+Fixed on both sides, because they are two different defects that happened to meet:
+
+- **The UI should not be able to build a request that is guaranteed to fail.** The stepper
+  is capped at the server's limit and the `+` button disables at it; `useBasket` clamps as
+  well, so the cap holds for any future caller. The coupon input gained `maxLength`, which
+  closes the phase-F over-long-code path from the browser too.
+- **The API should not leak the exception type's own formatting to anyone**, including a
+  caller who is not using the frontend. `InvalidBasketException` derives from
+  `ArgumentOutOfRangeException` — so every existing `catch` and the type's meaning are
+  unchanged — and carries `CustomerFacingMessage`, the sentence without the suffix. The
+  endpoints use that for `ProblemDetails.detail`; logs and stack traces still get the full
+  base `Message`, which is where the parameter name is useful.
+
+The scenario that covers the bound now also asserts the customer-facing message contains
+neither `Parameter` nor `Actual value`, so reverting the endpoints to `ex.Message` fails a
+test rather than shipping.
+
+**Mirrored constants, and why that is acceptable here.** `MAX_QUANTITY_PER_LINE` and
+`COUPON_CODE_MAX_LENGTH` in `useBasket.ts` are copies of `Basket.MaxQuantityPerLine` and
+`CouponCodeRules.MaxLength`. A copy can drift, and `CouponCodeRules` exists precisely
+because a duplicated constant caused a defect. The difference is what each copy governs:
+the server's value decides what is *accepted* and the client's decides what the UI lets you
+*build*. Drift low and the UI is merely stricter than it needs to be; drift high and the
+server still refuses. That is a different risk from two values that both had to be right.
+
+### A network failure showed the customer a JavaScript type name
+
+Found while testing the above, by aborting a request: a failure that never reaches the
+gateway is not an `ApiError`, and the catch fell back to `String(e)` — which renders as
+`TypeError: Failed to fetch`. The same objection as the section above, from the other end
+of the stack. Both catches now go through one `describeFailure`, which keeps the gateway's
+own message and correlation ID where there is one and says something a person can act on
+where there is not.

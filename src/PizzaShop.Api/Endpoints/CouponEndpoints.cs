@@ -44,12 +44,16 @@ public static class CouponEndpoints
                 detail: ex.Message,
                 statusCode: 400);
         }
-        catch (ArgumentOutOfRangeException ex)
+        catch (InvalidBasketException ex)
         {
             // Covers both bounds Basket.FromLinesAsync enforces: the quantity on a line
-            // and the number of lines. ex.Message names which, so the caller is told
-            // what to change rather than just that something was wrong.
-            return Results.Problem(title: "Invalid basket", detail: ex.Message, statusCode: 400);
+            // and the number of lines. CustomerFacingMessage names which, so the caller is
+            // told what to change rather than just that something was wrong.
+            //
+            // CustomerFacingMessage and not ex.Message: the base ArgumentOutOfRangeException
+            // appends "(Parameter 'lines')" and "Actual value was 52." to whatever message
+            // it is given, and this string is what the browser displays.
+            return Results.Problem(title: "Invalid basket", detail: ex.CustomerFacingMessage, statusCode: 400);
         }
 
         var pricing = await new PricingService(evaluator)

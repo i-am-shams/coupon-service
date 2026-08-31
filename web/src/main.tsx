@@ -18,6 +18,18 @@ async function bootstrap() {
   await msalInstance.initialize();
 
   const response = await msalInstance.handleRedirectPromise();
+
+  // Non-null means this load IS the return leg of a sign-in redirect: MSAL found an
+  // authorization response in the URL and consumed it. On an ordinary load it is null.
+  //
+  // App needs to know, because the restored coupon code has to be re-previewed on the
+  // way back from sign-in and must NOT be previewed at any other time. Deriving that
+  // from state — "there is a code and a basket" — is what produced the defect this
+  // signal replaces: the condition is also true the moment somebody types the first
+  // character of a code, so the app fired a preview for "P" and displayed
+  // "Not applied: NotFound" underneath a perfectly valid coupon.
+  const returnedFromRedirect = response !== null;
+
   if (response?.account) {
     msalInstance.setActiveAccount(response.account);
   } else if (!msalInstance.getActiveAccount() && msalInstance.getAllAccounts().length > 0) {
@@ -33,7 +45,7 @@ async function bootstrap() {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
       <MsalProvider instance={msalInstance}>
-        <App />
+        <App returnedFromRedirect={returnedFromRedirect} />
       </MsalProvider>
     </React.StrictMode>,
   );

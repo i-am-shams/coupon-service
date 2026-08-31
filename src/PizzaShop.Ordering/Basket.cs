@@ -11,6 +11,40 @@ public sealed class UnknownPizzaException(int pizzaId)
 }
 
 /// <summary>
+/// Thrown when a basket breaks one of its own bounds — a line quantity outside
+/// 1..<see cref="Basket.MaxQuantityPerLine"/>, or more than <see cref="Basket.MaxLines"/>
+/// lines.
+/// </summary>
+/// <remarks>
+/// <para>
+/// It derives from <see cref="ArgumentOutOfRangeException"/>, so every existing caller
+/// that catches that type keeps working and the type still says the right thing about
+/// what went wrong.
+/// </para>
+/// <para>
+/// It exists because <see cref="Exception.Message"/> on the base type is not safe to show
+/// a customer. .NET composes it as <c>{message} (Parameter '{paramName}')</c> followed by
+/// <c>Actual value was {actualValue}.</c>, and the endpoints put that string straight into
+/// <c>ProblemDetails.detail</c> — so a customer who clicked the + button past fifty was
+/// shown <c>"Quantity for pizza 1 must be at most 50. (Parameter 'lines') Actual value was
+/// 52."</c>. The first sentence is for them; the rest is an implementation detail of the
+/// exception type, and naming a parameter of a method they have never heard of is the
+/// kind of thing that makes an application look like it is leaking its insides.
+/// </para>
+/// <para>
+/// <see cref="CustomerFacingMessage"/> is that first sentence on its own. The base
+/// <c>Message</c> is left exactly as it was, because a log line and a stack trace both
+/// want the parameter name.
+/// </para>
+/// </remarks>
+public sealed class InvalidBasketException(string message, string paramName, object actualValue)
+    : ArgumentOutOfRangeException(paramName, actualValue, message)
+{
+    /// <summary>The message without .NET's parameter and actual-value suffix.</summary>
+    public string CustomerFacingMessage { get; } = message;
+}
+
+/// <summary>
 /// A basket line exactly as a client submits it: what, and how many.
 /// It carries no money, and there is no field here for one to arrive in.
 /// </summary>
@@ -96,7 +130,7 @@ public sealed record Basket
     /// from <paramref name="menu"/>.
     /// </summary>
     /// <exception cref="UnknownPizzaException">A line names a pizza not on the menu.</exception>
-    /// <exception cref="ArgumentOutOfRangeException">A line has a quantity below one.</exception>
+    /// <exception cref="InvalidBasketException">A line has a quantity outside 1..<see cref="MaxQuantityPerLine"/>, or there are more than <see cref="MaxLines"/> lines.</exception>
     public static async Task<Basket> FromLinesAsync(
         IEnumerable<BasketLine> lines,
         IMenu menu,
@@ -111,10 +145,10 @@ public sealed record Basket
 
         if (submitted.Count > MaxLines)
         {
-            throw new ArgumentOutOfRangeException(
+            throw new InvalidBasketException(
+                $"A basket may carry at most {MaxLines} lines.",
                 nameof(lines),
-                submitted.Count,
-                $"A basket may carry at most {MaxLines} lines.");
+                submitted.Count);
         }
 
         var items = new List<BasketItem>(submitted.Count);
@@ -125,19 +159,19 @@ public sealed record Basket
             // the same class of problem as accepting a price from the client.
             if (line.Quantity < 1)
             {
-                throw new ArgumentOutOfRangeException(
+                throw new InvalidBasketException(
+                    $"Quantity for pizza {line.PizzaId} must be at least 1.",
                     nameof(lines),
-                    line.Quantity,
-                    $"Quantity for pizza {line.PizzaId} must be at least 1.");
+                    line.Quantity);
             }
 
             // And an unbounded one prices a basket nobody could ever be sent.
             if (line.Quantity > MaxQuantityPerLine)
             {
-                throw new ArgumentOutOfRangeException(
+                throw new InvalidBasketException(
+                    $"Quantity for pizza {line.PizzaId} must be at most {MaxQuantityPerLine}.",
                     nameof(lines),
-                    line.Quantity,
-                    $"Quantity for pizza {line.PizzaId} must be at most {MaxQuantityPerLine}.");
+                    line.Quantity);
             }
 
             var unitPrice = await menu.GetUnitPriceAsync(line.PizzaId, cancellationToken)

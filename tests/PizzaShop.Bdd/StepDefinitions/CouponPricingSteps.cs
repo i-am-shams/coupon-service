@@ -185,11 +185,18 @@ public sealed class CouponPricingSteps
     public void ThenRefusedForQuantity()
     {
         Assert.NotNull(_refusal);
-        var ex = Assert.IsType<ArgumentOutOfRangeException>(_refusal);
+        var ex = Assert.IsType<InvalidBasketException>(_refusal);
 
         // Asserting on the bound rather than a fixed number, so raising the cap does
         // not silently turn this into a test of nothing.
-        Assert.Contains($"at most {Basket.MaxQuantityPerLine}", ex.Message);
+        Assert.Contains($"at most {Basket.MaxQuantityPerLine}", ex.CustomerFacingMessage);
+
+        // The message the customer is shown must not carry the exception type's own
+        // parameter and actual-value suffix. That suffix reached the browser verbatim
+        // once — "(Parameter 'lines') Actual value was 52." — and this is what stops it
+        // coming back if someone reverts the endpoints to ex.Message.
+        Assert.DoesNotContain("Parameter", ex.CustomerFacingMessage);
+        Assert.DoesNotContain("Actual value", ex.CustomerFacingMessage);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

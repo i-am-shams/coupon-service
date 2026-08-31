@@ -32,9 +32,22 @@ h2 { font-size: 1.1rem; margin: 1.75rem 0 .5rem; }
 button { padding: .45rem .9rem; border: 1px solid #d6cec3; background: #fff; color: #1c1a17; border-radius: .3rem; cursor: pointer; font: inherit; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button.primary { background: #1c1a17; color: #fff; border-color: #1c1a17; padding: .6rem 1.2rem; margin-top: 1rem; }
-.preview, .confirmation { margin-top: .75rem; padding: .75rem 1rem; border-radius: .4rem; border: 1px solid #e5ded4; background: #fff; }
-.preview.ok { border-color: #b7d3b0; }
-.preview.no { border-color: #e0c2b4; }
+.basket, .confirmation { margin-top: .75rem; padding: .75rem 1rem; border-radius: .4rem; border: 1px solid #e5ded4; background: #fff; }
+/*
+  The coupon verdict is a line inside the basket block rather than a panel of its own.
+
+  It used to be a separate bordered box that appeared only after pressing Check, and it
+  carried the only subtotal and total on the page — so the figures a customer needs were
+  reachable only by asking a question about a coupon, and an empty field produced a red
+  box under an empty input. The totals now stand on their own and this is a note beside
+  them: green when a discount applied, amber when a code was checked and refused. Amber
+  rather than red, because a refused coupon is not an error — the order still stands.
+*/
+.basket .applied { margin: 0 0 .25rem; color: #2f6b3f; font-size: .9rem; }
+.basket .not-applied { margin: 0 0 .25rem; color: #8a5a1c; font-size: .9rem; }
+.basket .hint { margin: 0; }
+.basket dl { margin: 0; }
+.basket dt:last-of-type, .basket dd:last-of-type { font-weight: 600; padding-top: .25rem; border-top: 1px solid #efe9e1; }
 dl { display: grid; grid-template-columns: auto 1fr; gap: .15rem 1rem; margin: .5rem 0 0; font-variant-numeric: tabular-nums; }
 dd { margin: 0; }
 .error { color: #a3311c; font-size: .9rem; }
