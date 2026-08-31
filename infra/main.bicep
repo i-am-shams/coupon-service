@@ -72,7 +72,7 @@ param apiClientId string
 // SQL administration
 // ---------------------------------------------------------------------------
 
-@description('OBJECT ID of the principal that runs the pipeline. Used twice: as the Entra administrator of the SQL server so the grant stage can create the contained user, and as the grantee of Storage Blob Data Contributor so the frontend upload needs no account key. Object ID here — the client ID form applies to the SQL contained user, not to the server administrator.')
+@description('OBJECT ID of the principal that runs the pipeline, set as the Entra administrator of the SQL server so the grant stage can create the contained user. Object ID here — the client ID form applies to the SQL contained user, not to the server administrator.')
 param deployingPrincipalObjectId string
 
 @description('Display name recorded for the SQL Entra administrator. Cosmetic; it is the object ID that grants access.')
@@ -123,7 +123,6 @@ module storage 'modules/storage.bicep' = {
   params: {
     location: location
     storageAccountName: effectiveStorageAccountName
-    deployingPrincipalObjectId: deployingPrincipalObjectId
     tags: tags
   }
 }

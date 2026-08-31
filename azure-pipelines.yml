@@ -489,18 +489,42 @@ stages:
             --404-document index.html \
             --output none
 
-          # Uploading blob CONTENT is a data action, which Contributor does NOT include —
-          # verified: it returns "You do not have the required permissions". Hence the
-          # Storage Blob Data Contributor assignment in infra/modules/storage.bicep, and
-          # hence no account key anywhere in this pipeline.
+          # -------------------------------------------------------------------------
+          # Uploading blob CONTENT is a data action, which Contributor does not include:
+          # over OAuth it returns "You do not have the required permissions".
+          #
+          # The obvious fix — have Bicep assign Storage Blob Data Contributor — does not
+          # work either. Contributor's notActions include Microsoft.Authorization/*/Write,
+          # so the pipeline cannot create a role assignment at all. Attempting it fails the
+          # whole deployment before a single resource is touched.
+          #
+          # Closing that gap would mean granting the service connection User Access
+          # Administrator: the power to grant itself any role, on anything, permanently.
+          # The account key is the smaller grant by a wide margin — Contributor already
+          # includes listKeys, so this principal can obtain the key regardless. Fetching it
+          # here adds no privilege it does not already have.
+          #
+          # The key is read, used and discarded inside this one task. It is never a
+          # pipeline variable, never echoed, and never written to a file. Rule 7.
+          # -------------------------------------------------------------------------
           echo "==> Uploading the bundle"
+          ACCOUNT_KEY=$(az storage account keys list \
+            --account-name "$(storageAccountName)" \
+            --resource-group "$(resourceGroupName)" \
+            --query "[0].value" -o tsv)
+          if [ -z "${ACCOUNT_KEY}" ]; then
+            echo "##vso[task.logissue type=error]Could not read the storage account key."
+            exit 1
+          fi
+
           az storage blob upload-batch \
             --account-name "$(storageAccountName)" \
-            --auth-mode login \
+            --account-key "${ACCOUNT_KEY}" \
             --destination '$web' \
             --source dist \
             --overwrite \
             --output none
+          unset ACCOUNT_KEY
 
           echo ""
           echo "Frontend: $(frontendOrigin)"

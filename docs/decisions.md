@@ -1072,6 +1072,67 @@ administrator and as this role's grantee — which is why it was renamed from
 `sqlAdminObjectId`. It is the same object ID, derived the same Graph-free way from the ARM
 token's `oid` claim.
 
+### The frontend upload uses the storage account key, because the alternative is a much larger grant
+
+**This reverses a decision made one build earlier, and the reversal is the interesting
+part.** `infra/modules/storage.bicep` briefly assigned Storage Blob Data Contributor to the
+deploying principal so the upload could use OAuth and the pipeline could claim no key
+anywhere. Build 9 failed provisioning before touching a single resource:
+
+    InvalidTemplateDeployment: Authorization failed for template resource ... of type
+    'Microsoft.Authorization/roleAssignments'. The client ... with object id
+    'd521e8e4-...' does not have permission to perform action
+    'Microsoft.Authorization/roleAssignments/write'
+
+**What was verified before, and what was not.** The earlier check established which
+*data-plane* permissions each call needs, and that was correct: the static website switch
+works over OAuth with Contributor, the upload does not. What went unchecked was whether the
+pipeline could grant itself the missing one. It cannot. Contributor is `*` minus its
+notActions, and `Microsoft.Authorization/*/Write` is in that list. Verified after the
+failure:
+
+    Contributor actions    : *
+    Contributor notActions : Microsoft.Authorization/*/Delete
+                             Microsoft.Authorization/*/Write
+                             Microsoft.Authorization/elevateAccess/Action
+                             ...
+
+The lesson generalises: checking that a principal can perform an operation is not the same
+as checking it can grant itself the permission for that operation, and a role assignment
+inside a template fails the *entire deployment* rather than degrading.
+
+**Why the account key is the better answer here, not merely the working one.**
+
+Making the role assignment succeed means granting the service connection **User Access
+Administrator** — the power to assign itself any role, on anything, permanently. That is a
+standing privilege escalation for the benefit of one file upload.
+
+The account key grants nothing new. Contributor already includes
+`Microsoft.Storage/storageAccounts/listKeys/action` — it is not in notActions — so this
+principal can obtain the key whenever it likes. Fetching it in the pipeline adds no
+capability it did not already have; it only makes the existing one visible.
+
+So the comparison is not "a key versus no key". It is "use a credential the principal can
+already mint, or permanently grant it the right to escalate its own privileges". The key
+wins on the security argument, not just on convenience.
+
+**How it is handled.** `az storage account keys list` at the moment it is needed, used
+within the same task, `unset` immediately after. Never a pipeline variable, never echoed,
+never written to a file — the same pattern the APIM subscription keys already use. Rule 7
+prohibits secrets in code, config and logs; this is in none of them.
+
+**What this costs, stated plainly.** The pipeline can no longer claim "no credential of any
+kind is used anywhere". The claim that survives, and that is worth more, is narrower and
+true: *no secret is stored anywhere, and no credential is used that the deploying principal
+could not already obtain*. The passwordless story for the running system is untouched — the
+App Service still reaches SQL as a managed identity, and API Management still reaches the
+App Service as one. This is a deployment-time credential, not a runtime one.
+
+**What would change it back.** If the service connection is ever given User Access
+Administrator for other reasons, the role assignment becomes free and
+`allowSharedKeyAccess` can be set to `false` on the storage account, which would close the
+key off entirely. The Bicep comment says so at the property.
+
 ### The redirect URI guard checks a record, not the registration
 
 The frontend stage fails if the deployed origin stops matching the `expectedFrontendOrigin`
