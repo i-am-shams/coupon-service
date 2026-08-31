@@ -10,9 +10,9 @@ public sealed class CouponRepository : ICouponRepository
 
     public CouponRepository(PizzaShopDbContext db) => _db = db;
 
-    public IReadOnlyList<CouponRecord> GetAll()
+    public async Task<IReadOnlyList<CouponRecord>> GetAllAsync(CancellationToken cancellationToken = default)
     {
-        return _db.Coupons
+        return await _db.Coupons
             .AsNoTracking()
             .Select(c => new CouponRecord(
                 c.Code,
@@ -23,7 +23,7 @@ public sealed class CouponRepository : ICouponRepository
                 c.MinimumOrderValue,
                 c.RedemptionLimit,
                 c.UsageCount))
-            .ToList();
+            .ToListAsync(cancellationToken);
     }
 
     public async Task<bool> TryRedeemAsync(string code, CancellationToken cancellationToken = default)

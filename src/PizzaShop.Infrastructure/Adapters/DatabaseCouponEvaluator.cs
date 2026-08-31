@@ -1,13 +1,12 @@
 using PizzaShop.Coupons;
 using PizzaShop.Infrastructure.Repositories;
-using PizzaShop.Ordering;
 
 namespace PizzaShop.Infrastructure.Adapters;
 
 /// <summary>
 /// Implements ICouponEvaluator by loading live coupon data from the repository on
 /// each call and delegating to the stateless CouponEvaluator for the rules logic.
-/// The evaluator itself is unchanged — only the source of its catalogue changes.
+/// The rules are unchanged — only the source of their catalogue changes.
 /// </summary>
 public sealed class DatabaseCouponEvaluator : ICouponEvaluator
 {
@@ -15,10 +14,13 @@ public sealed class DatabaseCouponEvaluator : ICouponEvaluator
 
     public DatabaseCouponEvaluator(ICouponRepository repository) => _repository = repository;
 
-    public CouponEvaluation Evaluate(string code, CouponBasket basket, DateTimeOffset asOf)
+    public async Task<CouponEvaluation> EvaluateAsync(
+        string code,
+        CouponBasket basket,
+        DateTimeOffset asOf,
+        CancellationToken cancellationToken = default)
     {
-        var catalogue = _repository.GetAll();
-        var evaluator = new CouponEvaluator(catalogue);
-        return evaluator.Evaluate(code, basket, asOf);
+        var catalogue = await _repository.GetAllAsync(cancellationToken);
+        return new CouponEvaluator(catalogue).Evaluate(code, basket, asOf);
     }
 }

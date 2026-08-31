@@ -19,16 +19,20 @@ public sealed record BasketLine(int PizzaId, int Quantity);
 /// <summary>
 /// The server's own price data. The only source a basket price may come from.
 /// </summary>
+/// <remarks>
+/// Asynchronous because the real implementation reads a database. Returns null when
+/// the pizza does not exist — an out parameter cannot cross an await.
+/// </remarks>
 public interface IMenu
 {
-    bool TryGetUnitPrice(int pizzaId, out decimal unitPrice);
+    Task<decimal?> GetUnitPriceAsync(int pizzaId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
 /// One priced line. The constructor is deliberately <c>internal</c>: outside this
 /// assembly a <see cref="BasketItem"/> cannot be created at all, so no caller can
 /// supply its own <see cref="UnitPrice"/>. Prices enter only through
-/// <see cref="Basket.FromLines"/>, which reads them from <see cref="IMenu"/>.
+/// <see cref="Basket.FromLinesAsync"/>, which reads them from <see cref="IMenu"/>.
 /// </summary>
 public sealed record BasketItem
 {
@@ -52,7 +56,7 @@ public sealed record BasketItem
 /// <remarks>
 /// Rule 1 — the server decides the price — is enforced here by construction rather
 /// than by convention. There is no public constructor, so the only way to obtain a
-/// Basket is to hand <see cref="FromLines"/> a set of client lines and a menu; the
+/// Basket is to hand <see cref="FromLinesAsync"/> a set of client lines and a menu; the
 /// unit prices are then read from the menu and cannot be influenced by the caller.
 /// Binding a request DTO straight onto a priced basket is not possible to write.
 /// </remarks>
@@ -70,7 +74,10 @@ public sealed record Basket
     /// </summary>
     /// <exception cref="UnknownPizzaException">A line names a pizza not on the menu.</exception>
     /// <exception cref="ArgumentOutOfRangeException">A line has a quantity below one.</exception>
-    public static Basket FromLines(IEnumerable<BasketLine> lines, IMenu menu)
+    public static async Task<Basket> FromLinesAsync(
+        IEnumerable<BasketLine> lines,
+        IMenu menu,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(lines);
         ArgumentNullException.ThrowIfNull(menu);
@@ -89,8 +96,8 @@ public sealed record Basket
                     $"Quantity for pizza {line.PizzaId} must be at least 1.");
             }
 
-            if (!menu.TryGetUnitPrice(line.PizzaId, out var unitPrice))
-                throw new UnknownPizzaException(line.PizzaId);
+            var unitPrice = await menu.GetUnitPriceAsync(line.PizzaId, cancellationToken)
+                            ?? throw new UnknownPizzaException(line.PizzaId);
 
             items.Add(new BasketItem(line.PizzaId, line.Quantity, unitPrice));
         }

@@ -47,15 +47,16 @@ try
 
     // Migrations run at startup — approach.md §7 decision.
     // Trade-off: can race across instances; migration bundles are the production answer.
-    // IsRelational() guard skips this for in-memory databases used in tests.
-    using (var scope = app.Services.CreateScope())
+    //
+    // Tests are excluded by environment rather than by IsRelational(): the test host
+    // uses SQLite, which *is* relational, and the migrations are SQL Server specific.
+    // The test factory creates its schema directly and seeds its own data.
+    if (!app.Environment.IsEnvironment("Test"))
     {
+        using var scope = app.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<PizzaShopDbContext>();
-        if (db.Database.IsRelational())
-        {
-            await db.Database.MigrateAsync();
-            await PizzaShopDbSeeder.SeedAsync(db);
-        }
+        await db.Database.MigrateAsync();
+        await PizzaShopDbSeeder.SeedAsync(db);
     }
 
     app.UseHttpsRedirection();
@@ -65,7 +66,12 @@ try
     app.MapOrderEndpoints();
 
     // Liveness: checks nothing external. A DB blip must not restart a healthy app.
-    app.MapHealthChecks("/health");
+    // The empty predicate is what makes that true — MapHealthChecks with no options
+    // runs *every* registered check, database included.
+    app.MapHealthChecks("/health", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+    {
+        Predicate = _ => false,
+    });
 
     // Readiness: checks the database.
     app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
@@ -77,7 +83,11 @@ try
 }
 catch (Exception ex) when (ex is not HostAbortedException)
 {
+    // A failed startup — a migration that throws, most likely — must exit non-zero.
+    // Returning normally here reports success to the host while serving nothing, and
+    // a deployment gate checking exit status would go green on a broken release.
     Log.Fatal(ex, "Application terminated unexpectedly");
+    Environment.ExitCode = 1;
 }
 finally
 {

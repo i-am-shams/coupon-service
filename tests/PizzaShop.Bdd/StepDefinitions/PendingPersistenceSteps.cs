@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using PizzaShop.Api.Endpoints;
@@ -56,9 +57,6 @@ public sealed class PersistenceSteps : IDisposable
     [Given(@"I submit an order claiming a pizza costs (\d+(?:\.\d+)?) but the server has it at (\d+(?:\.\d+)?)")]
     public async Task GivenOrderWithFakePrice(decimal clientPrice, decimal serverPrice)
     {
-        // The step title mentions "clientPrice" to make the scenario readable, but the request
-        // DTO has no price field — Rule 1 makes it structurally impossible to send one.
-        // serverPrice is what the database holds; that is what the total must reflect.
         _factory = new PizzaShopWebApplicationFactory();
         _client = _factory.CreateClient(); // starts server, initialises DI
         _factory.SeedDatabase(
@@ -67,12 +65,19 @@ public sealed class PersistenceSteps : IDisposable
                 new PizzaEntity { Id = 1, Name = "Margherita", Description = "Test pizza", Price = serverPrice },
             });
 
-        // Submit the order with no price — only pizzaId + quantity.
-        var request = new OrderRequest(
-            CouponCode: null,
-            Items: new[] { new BasketLineRequest(PizzaId: 1, Quantity: 1) });
+        // Raw JSON, not the typed DTO. The client really does send a price here —
+        // that is the whole point of the scenario. Going through OrderRequest would
+        // make the claim unsendable, and the assertion would then pass because the
+        // test could not express the attack rather than because the server resisted it.
+        var json = $$"""
+            {
+              "couponCode": null,
+              "items": [ { "pizzaId": 1, "quantity": 1, "unitPrice": {{clientPrice}}, "price": {{clientPrice}} } ]
+            }
+            """;
 
-        var response = await _client.PostAsJsonAsync("/api/v1/orders", request);
+        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        var response = await _client.PostAsync("/api/v1/orders", content);
         response.EnsureSuccessStatusCode();
         _orderResponse = await response.Content.ReadFromJsonAsync<OrderResponse>();
     }
@@ -120,10 +125,16 @@ public sealed class PersistenceSteps : IDisposable
     }
 
     [Then(@"the order total should reflect the server price of (\d+(?:\.\d+)?)")]
-    public void ThenTotalReflectsServerPrice(decimal serverPrice)
+    public async Task ThenTotalReflectsServerPrice(decimal serverPrice)
     {
         Assert.NotNull(_orderResponse);
         Assert.Equal(serverPrice, _orderResponse!.Total);
+
+        // The stored line must carry the server price too, not just the response total.
+        using var scope = _factory!.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<PizzaShopDbContext>();
+        var line = await db.OrderLines.FirstAsync(l => l.OrderId == _orderResponse.OrderId);
+        Assert.Equal(serverPrice, line.UnitPrice);
     }
 
     // ── IDisposable ───────────────────────────────────────────────────────

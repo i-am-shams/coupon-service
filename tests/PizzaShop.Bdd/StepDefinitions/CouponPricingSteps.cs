@@ -126,10 +126,12 @@ public sealed class CouponPricingSteps
     // ── Pricing actions ──────────────────────────────────────────────────────
 
     [When("I price the basket without a coupon")]
-    public void WhenPriceNoCoupon() => _result = BuildPricingService().Price(BuildBasket(), null, Now);
+    public async Task WhenPriceNoCoupon() =>
+        _result = await BuildPricingService().PriceAsync(await BuildBasketAsync(), null, Now);
 
     [When(@"I price the basket with coupon ""([^""]*)""")]
-    public void WhenPriceWithCoupon(string code) => _result = BuildPricingService().Price(BuildBasket(), code, Now);
+    public async Task WhenPriceWithCoupon(string code) =>
+        _result = await BuildPricingService().PriceAsync(await BuildBasketAsync(), code, Now);
 
     // ── Assertions ───────────────────────────────────────────────────────────
 
@@ -162,8 +164,8 @@ public sealed class CouponPricingSteps
 
     // The scenarios build a basket the only way production code can: client lines
     // plus the server's menu. There is no path here that supplies a price directly.
-    private Basket BuildBasket() =>
-        Basket.FromLines(
+    private Task<Basket> BuildBasketAsync() =>
+        Basket.FromLinesAsync(
             _basketItems.Select(i => new BasketLine(i.PizzaId, i.Quantity)),
             new MenuPriceTable(_prices));
 
@@ -173,7 +175,7 @@ public sealed class CouponPricingSteps
     /// <summary>The server's price data for a scenario, standing in for phase B's menu.</summary>
     private sealed class MenuPriceTable(IReadOnlyDictionary<int, decimal> prices) : IMenu
     {
-        public bool TryGetUnitPrice(int pizzaId, out decimal unitPrice) =>
-            prices.TryGetValue(pizzaId, out unitPrice);
+        public Task<decimal?> GetUnitPriceAsync(int pizzaId, CancellationToken cancellationToken = default) =>
+            Task.FromResult(prices.TryGetValue(pizzaId, out var price) ? price : (decimal?)null);
     }
 }

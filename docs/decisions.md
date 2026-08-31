@@ -400,3 +400,57 @@ and would otherwise have been reachable through a perfectly valid-looking reques
 
 Rule 1 is described in approach.md §4 as the most important decision in the design. It
 was previously true only because no code violated it yet.
+
+## Phase B — the in-memory provider is SQLite, not EF InMemory
+
+approach.md §8 says the database "is swapped for an in-memory one". That now means
+**SQLite in-memory** specifically, and the distinction is not cosmetic.
+
+The EF Core in-memory provider supports neither of the two mechanisms the design
+depends on. Both were confirmed by running them:
+
+    TryRedeemAsync => InvalidOperationException: The LINQ expression 'DbSet<CouponEntity>()...'
+    BeginTransaction => Transactions are not supported by the in-memory store
+
+`ExecuteUpdateAsync` is rule 4's atomic redemption, and the transaction is what keeps a
+redemption and its order from diverging. Under the EF in-memory provider every order
+carrying a coupon returned a 500 — and the suite passed anyway, because the only order
+scenario sent no coupon code. The most important concurrency invariant in the design
+had no coverage and could not have had any.
+
+SQLite in-memory supports both. The test host holds one open `SqliteConnection` for the
+lifetime of the factory, since a SQLite in-memory database exists only while a
+connection to it is open, and creates the schema with `EnsureCreated()`.
+
+**Consequence for startup migrations.** The guard in `Program.cs` is now
+`!app.Environment.IsEnvironment("Test")` rather than `db.Database.IsRelational()`.
+SQLite *is* relational, and the migrations are SQL Server specific, so the old guard
+would have run them against SQLite and failed. The trade is that the migration path
+itself is not exercised by the test suite — it was not exercised before either, and
+the pipeline's deployment is what covers it.
+
+**Action:** approach.md §8 should say "SQLite in-memory" rather than "an in-memory
+provider" when that document is next revised, with the reason — otherwise the next
+person reaches for the EF provider, which is the obvious choice and the wrong one.
+
+## Phase B — an order records no customer identity
+
+`OrderEntity` has `CreatedAt`, amounts, coupon fields and lines. It has no user column,
+and the order endpoint reads no caller identity.
+
+This is deliberate and consistent with approach.md §10 assumption 5: orders are stored
+but not fulfilled, and there is no payment step. Nothing in the assignment requires
+knowing who placed an order.
+
+**The part worth having visible:** phase D puts `validate-jwt` on `POST /orders`, so
+from that point there *is* a signed-in user on every order — and their orders still will
+not be attributable to them. A reviewer may reasonably ask why an authenticated endpoint
+discards the identity it just authenticated.
+
+The answer, if it stays this way, is that authentication here authorises the action
+rather than personalising it: the token proves the caller may place an order, and the
+assignment never asks for order history, per-user rate limits, or "my orders". If any of
+those were in scope, the token's `oid` claim is the column to add — `oid` rather than
+`preferred_username`, per the spike 3 finding on `#EXT#` guests.
+
+Recorded now rather than discovered during phase D.

@@ -20,7 +20,11 @@ public sealed class PricingService
     /// <paramref name="asOf"/> is injected so callers control the point in time —
     /// no DateTime.UtcNow inside domain logic.
     /// </summary>
-    public OrderPricing Price(Basket basket, string? couponCode, DateTimeOffset asOf)
+    public async Task<OrderPricing> PriceAsync(
+        Basket basket,
+        string? couponCode,
+        DateTimeOffset asOf,
+        CancellationToken cancellationToken = default)
     {
         var subtotal = basket.Subtotal;
 
@@ -35,7 +39,8 @@ public sealed class PricingService
                 RejectionReason: null);
         }
 
-        var evaluation = _couponEvaluator.Evaluate(couponCode, new CouponBasket(subtotal), asOf);
+        var evaluation = await _couponEvaluator.EvaluateAsync(
+            couponCode, new CouponBasket(subtotal), asOf, cancellationToken);
 
         // Total floors at zero — discount can never exceed the subtotal.
         var total = Math.Max(0m, subtotal - evaluation.DiscountAmount);

@@ -30,7 +30,7 @@ public static class OrderEndpoints
         Basket basket;
         try
         {
-            basket = Basket.FromLines(
+            basket = await Basket.FromLinesAsync(
                 request.Items.Select(i => new BasketLine(i.PizzaId, i.Quantity)),
                 menu);
         }
@@ -45,10 +45,16 @@ public static class OrderEndpoints
         }
 
         var asOf = DateTimeOffset.UtcNow;
-        var pricing = new PricingService(evaluator).Price(basket, request.CouponCode, asOf);
+        var pricingService = new PricingService(evaluator);
+        var pricing = await pricingService.PriceAsync(basket, request.CouponCode, asOf);
 
         var couponApplied = false;
         var rejectionReason = pricing.RejectionReason;
+
+        // The redemption and the order are one operation. ExecuteUpdateAsync commits
+        // immediately on its own, so without this transaction a failure in the order
+        // write would leave a coupon consumed against an order that does not exist.
+        await using var transaction = await db.Database.BeginTransactionAsync();
 
         if (pricing.CouponApplied && !string.IsNullOrWhiteSpace(request.CouponCode))
         {
@@ -62,7 +68,7 @@ public static class OrderEndpoints
                 logger.LogWarning(
                     "Coupon {CouponCode} exhausted between evaluation and redemption; order repriced without it",
                     request.CouponCode);
-                pricing = new PricingService(evaluator).Price(basket, null, asOf);
+                pricing = await pricingService.PriceAsync(basket, null, asOf);
                 rejectionReason = CouponRejectionReason.RedemptionLimitReached;
             }
         }
@@ -71,7 +77,7 @@ public static class OrderEndpoints
         {
             CreatedAt      = asOf,
             Subtotal       = pricing.Subtotal,
-            DiscountAmount = couponApplied ? pricing.DiscountAmount : 0m,
+            DiscountAmount = pricing.DiscountAmount,
             Total          = pricing.Total,
             CouponCode     = request.CouponCode,
             CouponApplied  = couponApplied,
@@ -85,6 +91,21 @@ public static class OrderEndpoints
 
         db.Orders.Add(order);
         await db.SaveChangesAsync();
+
+        if (couponApplied)
+        {
+            // The audit trail the Coupons table's UsageCount cannot give: which order
+            // consumed which redemption, and when. Written inside the same transaction.
+            db.CouponRedemptions.Add(new CouponRedemptionEntity
+            {
+                OrderId    = order.Id,
+                CouponCode = request.CouponCode!,
+                RedeemedAt = asOf,
+            });
+            await db.SaveChangesAsync();
+        }
+
+        await transaction.CommitAsync();
 
         // Rule 9: named properties, never interpolation.
         logger.LogInformation(

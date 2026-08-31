@@ -17,7 +17,7 @@ public static class CouponEndpoints
         return app;
     }
 
-    private static IResult ValidateCoupon(
+    private static async Task<IResult> ValidateCoupon(
         CouponValidationRequest request,
         IMenu menu,
         ICouponEvaluator evaluator,
@@ -26,7 +26,7 @@ public static class CouponEndpoints
         Basket basket;
         try
         {
-            basket = Basket.FromLines(
+            basket = await Basket.FromLinesAsync(
                 request.Items.Select(i => new BasketLine(i.PizzaId, i.Quantity)),
                 menu);
         }
@@ -43,17 +43,25 @@ public static class CouponEndpoints
             return Results.Problem(title: "Invalid quantity", detail: ex.Message, statusCode: 400);
         }
 
-        var pricing = new PricingService(evaluator).Price(basket, request.CouponCode, DateTimeOffset.UtcNow);
+        var pricing = await new PricingService(evaluator)
+            .PriceAsync(basket, request.CouponCode, DateTimeOffset.UtcNow);
+
+        // Rule 3: a rejection always carries a reason. Asking "is this coupon valid?"
+        // with no code is answered by NotFound, not by an invalid result with a null
+        // reason, which would leave the caller with nothing to show the customer.
+        var rejectionReason = string.IsNullOrWhiteSpace(request.CouponCode)
+            ? CouponRejectionReason.NotFound
+            : pricing.RejectionReason;
 
         // Rule 9: named properties, never interpolation.
         logger.LogInformation(
             "Coupon validation: code={CouponCode} valid={IsValid} discount={Discount} reason={Reason}",
-            request.CouponCode, pricing.CouponApplied, pricing.DiscountAmount, pricing.RejectionReason);
+            request.CouponCode, pricing.CouponApplied, pricing.DiscountAmount, rejectionReason);
 
         return Results.Ok(new CouponValidationResponse(
             CouponCode: request.CouponCode,
             IsValid: pricing.CouponApplied,
-            RejectionReason: pricing.RejectionReason?.ToString(),
+            RejectionReason: rejectionReason?.ToString(),
             Subtotal: pricing.Subtotal,
             DiscountAmount: pricing.DiscountAmount,
             Total: pricing.Total,

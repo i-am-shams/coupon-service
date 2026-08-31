@@ -14,6 +14,17 @@ public sealed class CouponEvaluator : ICouponEvaluator
         _catalogue = catalogue.ToDictionary(c => c.Code, StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// The catalogue is already in memory here, so there is nothing to await — the
+    /// rules are pure. The async signature belongs to the port, not to this class.
+    /// </summary>
+    public Task<CouponEvaluation> EvaluateAsync(
+        string code,
+        CouponBasket basket,
+        DateTimeOffset asOf,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(Evaluate(code, basket, asOf));
+
     public CouponEvaluation Evaluate(string code, CouponBasket basket, DateTimeOffset asOf)
     {
         // A missing or blank code is not an error — it is simply not a coupon.
