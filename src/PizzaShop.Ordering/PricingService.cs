@@ -46,6 +46,6 @@ public sealed class PricingService
             Total: total,
             CouponApplied: evaluation.IsValid,
             CouponDescription: evaluation.Description,
-            RejectionReason: evaluation.Reason?.ToString());
+            RejectionReason: evaluation.Reason);
     }
 }

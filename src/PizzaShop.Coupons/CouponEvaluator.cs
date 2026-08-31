@@ -16,9 +16,13 @@ public sealed class CouponEvaluator : ICouponEvaluator
 
     public CouponEvaluation Evaluate(string code, CouponBasket basket, DateTimeOffset asOf)
     {
-        if (!_catalogue.TryGetValue(code, out var coupon))
+        // A missing or blank code is not an error — it is simply not a coupon.
+        // The interface is public and phase D calls it straight from an endpoint.
+        if (string.IsNullOrWhiteSpace(code) || !_catalogue.TryGetValue(code, out var coupon))
             return Rejected(CouponRejectionReason.NotFound);
 
+        // The boundary is inclusive: a coupon is still valid at the instant it
+        // expires, and invalid from the first tick after.
         if (asOf > coupon.ExpiresAt)
             return Rejected(CouponRejectionReason.Expired);
 

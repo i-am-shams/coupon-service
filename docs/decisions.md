@@ -305,3 +305,52 @@ altogether.
 randomises access token lifetime between roughly 60 and 90 minutes to avoid fleets of
 clients re-authenticating in lockstep. The debugging heuristic still holds (a call that
 worked and now returns 401 is probably an expired token); the exact number does not.
+
+## Phase A — the coupon evaluator sees a subtotal, not a basket
+
+approach.md §2 publishes the interface as `Evaluate(string code, Basket basket,
+DateTimeOffset asOf)`. The implementation passes a `CouponBasket(decimal Subtotal)`
+instead. Recording the divergence because the approved design document says otherwise
+and a reviewer will read it.
+
+**Why.** `Ordering.Basket` carries `BasketItem.UnitPrice`, so passing it would hand the
+coupon domain pizza prices and product IDs — exactly what the `AGENTS.md` dependency
+rule forbids ("Coupons must not know about pizza prices, delivery, or orders"). With a
+subtotal only, the boundary is not a convention the coupon code is trusted to respect:
+it genuinely cannot see what is in the basket.
+
+**The trade, stated plainly.** Every condition in the locked coupon set — expiry,
+minimum order value, redemption limit — needs only a subtotal, so nothing in scope is
+lost. What this closes off is any *item-scoped* coupon: "10% off pizzas only", buy one
+get one, a category restriction, a minimum item count. Adding one of those means
+reopening this boundary and passing item data across it, which is a deliberate design
+change rather than a small edit.
+
+That is the right trade here. approach.md §2 already rejects free-item coupons for the
+same reason — they would tie coupons to the product catalogue for no real benefit — and
+§10 locks the set to two types and three conditions. The tighter signature makes that
+decision structural instead of implicit.
+
+**Action:** approach.md §2's interface listing should be updated to `CouponBasket` when
+that document is next revised.
+
+## Phase A — rule 1 is enforced by construction, not by convention
+
+`Basket` has no public constructor and `BasketItem`'s constructor is `internal`. The
+only way to obtain a priced basket is `Basket.FromLines(IEnumerable<BasketLine>, IMenu)`,
+which reads every unit price from the menu. `BasketLine` carries `PizzaId` and
+`Quantity` and has no field a price could arrive in.
+
+Verified by compiling a probe in `PizzaShop.Api` that tried to fabricate a priced line:
+
+    error CS1729: 'BasketItem' does not contain a constructor that takes 3 arguments
+
+So binding a request DTO onto a priced basket is not something that can be written from
+outside the Ordering assembly — it fails the build rather than passing review.
+
+`FromLines` also rejects a quantity below one. A negative quantity would subtract from
+the subtotal, which is the same class of problem as accepting a price from the client
+and would otherwise have been reachable through a perfectly valid-looking request.
+
+Rule 1 is described in approach.md §4 as the most important decision in the design. It
+was previously true only because no code violated it yet.

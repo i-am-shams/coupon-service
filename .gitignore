@@ -488,3 +488,6 @@ infra/params.local.json
 *.pdf
 spike-vars.ps1
 spike/
+
+# Reqnroll regenerates these from the .feature files on every build.
+*.feature.cs

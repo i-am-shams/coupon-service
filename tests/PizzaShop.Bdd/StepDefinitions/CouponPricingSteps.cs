@@ -155,19 +155,25 @@ public sealed class CouponPricingSteps
         Assert.False(_result!.CouponApplied);
         // The mapping from readable step text to the enum lives here, not in the feature file.
         var expected = Enum.Parse<CouponRejectionReason>(reason);
-        Assert.Equal(expected.ToString(), _result!.RejectionReason);
+        Assert.Equal(expected, _result!.RejectionReason);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private Basket BuildBasket()
-    {
-        var items = _basketItems
-            .Select(i => new BasketItem(i.PizzaId, i.Quantity, _prices[i.PizzaId]))
-            .ToList();
-        return new Basket(items);
-    }
+    // The scenarios build a basket the only way production code can: client lines
+    // plus the server's menu. There is no path here that supplies a price directly.
+    private Basket BuildBasket() =>
+        Basket.FromLines(
+            _basketItems.Select(i => new BasketLine(i.PizzaId, i.Quantity)),
+            new MenuPriceTable(_prices));
 
     private PricingService BuildPricingService() =>
         new PricingService(new CouponEvaluator(_coupons));
+
+    /// <summary>The server's price data for a scenario, standing in for phase B's menu.</summary>
+    private sealed class MenuPriceTable(IReadOnlyDictionary<int, decimal> prices) : IMenu
+    {
+        public bool TryGetUnitPrice(int pizzaId, out decimal unitPrice) =>
+            prices.TryGetValue(pizzaId, out unitPrice);
+    }
 }
