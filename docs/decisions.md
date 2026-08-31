@@ -471,6 +471,12 @@ connection's principal has no Graph application permissions, so it returns
 `Authorization_RequestDenied`. Granting it some would add a fourth item to the Day 0 list
 in approach.md §7, which is the thing that list exists to prevent.
 
+**2026-08-31 — the count is five, not three.** Day 0 was later found to have two items
+that were always there and had been left implicit: the Azure DevOps project and pipeline,
+and the pipeline variables. So "a fourth item" above reads as "a sixth" today. The current
+list is deployment.md §2, which also explains the undercount. approach.md §7 still says
+three deliberately, as the record of what was believed when it was written.
+
 **The deciding argument was durability, not convenience.** A system-assigned identity dies
 with its App Service. Recreate the app alone and the client ID changes while the name does
 not, so the SQL contained user — matched by name — survives carrying a SID that no longer
