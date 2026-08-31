@@ -826,6 +826,38 @@ Every value in the policy is one spike 3 observed on a decoded token — bare cl
 audience, v2 issuer with no trailing slash, `scp` containing `Orders.Write`, no `roles`
 block. Placeholders are `__TENANT_ID__` and `__API_CLIENT_ID__`, substituted by Bicep.
 
+### `validate-jwt` child element order is schema, not style
+
+Build 6 failed provisioning with:
+
+    ValidationError, target 'validate-jwt':
+    Error in element 'validate-jwt' on line 27, column 10: The element 'validate-jwt' has
+    invalid child element 'audiences'. List of possible elements expected: 'required-claims'.
+
+The policy had `issuers` before `audiences`. The canonical statement in the validate-jwt
+reference fixes the order as:
+
+    openid-config, issuer-signing-keys, decryption-keys, audiences, issuers, required-claims
+
+and the page states it explicitly: "Set the policy's elements and child elements in the
+order provided in the policy statement."
+
+**Worth recording because the documentation contradicts itself.** Searching for samples
+returns two — both on the AI-APIs authorization page — that show `issuers` before
+`audiences`. They would be rejected exactly as this was. Four other samples, including the
+canonical "protect a backend with Microsoft Entra ID" one, show the documented order. A
+sample is not the schema; the policy statement block is.
+
+This is the second policy-schema failure in this project after the
+`authentication-managed-identity` placement, and both cost a provision cycle to discover
+because APIM validates policy content only at save time — `az bicep build`,
+`az deployment group validate` and `what-if` all pass a policy that the APIM resource
+provider will reject. There is no local validation for policy XML beyond well-formedness.
+
+**Consequence for phases E and F:** a policy change is not testable before deployment.
+Budget a provision cycle for each one, or attach the policy to a scratch API in the running
+APIM instance first to get the validation error in seconds rather than minutes.
+
 ### The two tokens, and which parts of them the smoke test can prove
 
 A request to `POST /orders` involves two different tokens and both have to be right:

@@ -29,18 +29,26 @@
             failed-validation-httpcode="401"
             failed-validation-error-message="Unauthorized. A valid access token with the Orders.Write scope is required to place an order.">
             <openid-config url="https://login.microsoftonline.com/__TENANT_ID__/v2.0/.well-known/openid-configuration" />
-            <issuers>
-                <!-- Observed: the v2 issuer, no trailing slash. A v1 token would
-                     carry https://sts.windows.net/__TENANT_ID__/ instead — which is
-                     why coupon-api sets requestedAccessTokenVersion = 2. -->
-                <issuer>https://login.microsoftonline.com/__TENANT_ID__/v2.0</issuer>
-            </issuers>
+            <!--
+                Element ORDER below is schema, not style. The validate-jwt reference
+                lists audiences before issuers, and APIM rejects the policy at save time
+                otherwise: "The element 'validate-jwt' has invalid child element
+                'audiences'. List of possible elements expected: 'required-claims'."
+                Two samples in the Microsoft docs show the reverse order; they are wrong
+                and would be rejected the same way.
+            -->
             <audiences>
                 <!-- Observed: the BARE client ID of coupon-api, not the
                      api://<guid> application ID URI. This tenant issues the bare
                      GUID for a v2 token. Do not "correct" this to the api:// form. -->
                 <audience>__API_CLIENT_ID__</audience>
             </audiences>
+            <issuers>
+                <!-- Observed: the v2 issuer, no trailing slash. A v1 token would
+                     carry https://sts.windows.net/__TENANT_ID__/ instead — which is
+                     why coupon-api sets requestedAccessTokenVersion = 2. -->
+                <issuer>https://login.microsoftonline.com/__TENANT_ID__/v2.0</issuer>
+            </issuers>
             <required-claims>
                 <!-- Delegated flow: the caller's permission arrives in scp, and
                      roles is absent. A required-claims block matching roles would
