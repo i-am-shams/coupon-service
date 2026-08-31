@@ -6,6 +6,11 @@ Deleting the resource group and re-running `azure-pipelines.yml` produces a runn
 no manual intervention. That is the acceptance test for this project, and everything below is
 organised around keeping it true.
 
+**It has been run.** On 2026-08-30 the resource group was deleted and the pipeline re-run from
+empty: build 22, 17 minutes, six of six smoke assertions, and a signed-in order placed through
+the rebuilt system afterwards by hand. Stage timings and what did and did not come back
+identical are in §6.
+
 ---
 
 ## 1. What gets deployed
@@ -425,6 +430,15 @@ polls `checkNameAvailability` on the exact name until ARM reports it free — be
 waiting for the purge and ARM releasing the reserved name are two different events. If the name
 is still held after five minutes the stage fails with a message saying so, rather than letting
 the template be the thing that discovers it.
+
+**Tested for real on 2026-08-30.** The resource group was deleted and the pipeline re-run;
+build 22 succeeded in 17 minutes from empty. The purge took **91 seconds** between being issued
+and completing, against a name that `checkNameAvailability` reported as unavailable immediately
+beforehand - so the old `az rest` version, which returns in about a second, would have raced it
+and failed. The availability poll then succeeded on its first attempt.
+
+The soft-deleted Log Analytics workspace was recovered rather than recreated, as the new check
+predicted: the workspace customer ID is identical across the teardown.
 
 **The general point:** a conditional that has never been true is not tested by any number of
 green runs. It is code that has been compiled and never run, sitting in the middle of the claim

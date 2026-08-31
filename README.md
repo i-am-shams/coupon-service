@@ -70,7 +70,10 @@ Gateway: `https://apim-couponsvc-lab-dtjori.azure-api.net`
 ## Deploy it
 
 Everything below the Day 0 line is automated. Deleting the resource group and re-running the
-pipeline produces a working system.
+pipeline produces a working system — **tested on 2026-08-30**, not merely designed for: the
+group was deleted and rebuilt from empty in 17 minutes, ending with an order placed through
+the browser against the rebuilt system. [docs/deployment.md](docs/deployment.md) §6 has the
+stage timings and the two soft-deletes that stand in the way.
 
 **Day 0 — by hand, once. Five items.** A pipeline cannot create the credential it uses to log
 in, and it cannot create itself.

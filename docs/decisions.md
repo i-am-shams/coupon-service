@@ -1755,3 +1755,88 @@ Verified against the live subscription before being written, rather than after: 
 endpoint is `.../providers/Microsoft.OperationalInsights/deletedWorkspaces` and the
 api-version is `2023-09-01`. `2021-06-01` returns `InvalidResourceType`, so the version is
 load-bearing and not decorative.
+
+### The from-scratch claim, finally tested (2026-08-30)
+
+`rg-coupon-service` was deleted and the pipeline re-run. **Build 22 succeeded in 17
+minutes**, from an empty resource group, and the result is that the headline claim of this
+project is now a tested statement rather than a designed one.
+
+It had never been tested before. Every resource in the group was created on 2026-08-27 and
+the seventeen deployments after it were incremental.
+
+**The purge branch executed, and the 91 seconds is the whole argument:**
+
+```
+==> Purging any soft-deleted API Management service for this project
+    purging apim-couponsvc-lab-dtjori (centralindia)        16:16:56
+    waiting for the name to be released                     16:18:27
+    apim-couponsvc-lab-dtjori released (attempt 1 of 30)    16:18:28
+```
+
+Ninety-one seconds between issuing the purge and the operation completing. The previous
+`az rest --method delete` would have returned in about one second and handed straight over
+to `az deployment group create`, which would have met a name that `checkNameAvailability`
+reported — measured, immediately before the run — as `nameAvailable: false`,
+`reason: AlreadyExists`. This was not a defensive fix.
+
+The name-availability poll succeeded on its first attempt, so the CLI's own wait turned out
+to be sufficient. That is only knowable because it was measured; it stays, because the cost
+of a check that passes first time is nothing and the cost of the alternative is 48 hours.
+
+**The Log Analytics check was not hypothetical either.** `log-couponsvc-lab` was genuinely
+in its 14-day window, the stage said so, and the proof that the recovery happened is that
+the workspace's customer ID is byte-identical across the teardown:
+
+```
+log analytics customerId   BEFORE  8246a698-4c19-449d-88da-a92aca314763
+log analytics customerId   AFTER   8246a698-4c19-449d-88da-a92aca314763
+```
+
+Recovered, not recreated, exactly as the step predicted.
+
+**What came back identical, and what did not.** Recorded before the delete so the
+comparison is evidence rather than recollection:
+
+| | Before | After |
+|---|---|---|
+| storage account | `stcouponsvclabdtjori` | same |
+| web endpoint | `…z29.web.core.windows.net/` | same — the `zNN` segment held |
+| gateway URL | `apim-couponsvc-lab-dtjori.azure-api.net` | same |
+| App Service, SQL FQDN | | same |
+| API identity client ID | `8fd2fc7e-…` | `b79157a8-…` |
+| gateway identity client ID | `0632cec4-…` | `abe0672e-…` |
+
+The two identity client IDs are new principals, which is expected and is why nothing
+hardcodes them: the APIM policy's `client-id`, Easy Auth's `allowedApplications` and the SQL
+contained user's SID are all wired from Bicep outputs, and all three worked first time.
+
+**The `zNN` segment surviving is luck, not design, and the guard is what makes that safe.**
+It held here, so no Entra work was needed. `deployment.md` §6 already says it is not
+guaranteed across a delete-and-recreate; that remains true and untested, because this run
+did not exercise it.
+
+**Stage timings from empty**, worth having beside the incremental ones:
+
+```
+1  Build and test        1m30s     15 BDD scenarios
+2  Provision             8m46s     purge 91s, Bicep 6m49s (vs 2m12s incremental)
+3  Grant DB access         50s
+4  Deploy backend        3m16s
+5  Build and deploy UI   1m10s     redirect URI guard passed
+6  Smoke test            1m26s     6/6
+```
+
+**The smoke test's polling earned its keep on exactly the failure it was written for.**
+Assertion 2 took five attempts over 45 seconds, and the first four returned **404** — which
+`deployment.md` §6 records as the reading that sends you to APIM routing when the only
+problem is that the app has not finished starting. A single call would have failed and
+told you nothing.
+
+**Verified afterwards by hand, because six green assertions are all negatives plus one
+positive hop:** the full browser path on the rebuilt system — menu, quantities, coupon
+preview, sign-in redirect, order. It produced **Order #1**. The identity counter restarting
+at 1 is the cleanest available proof that the database is new rather than recovered:
+nothing was carried over, the schema was created by EF migrations at first boot and seeded
+from scratch, and the coupon that discounted the order was redeemed against a fresh
+`UsageCount`.
