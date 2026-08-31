@@ -1241,6 +1241,45 @@ URIs go on the SPA platform, and that the deployed origin is added once the stor
 exists — the origin is not knowable before then, which is why this Day 0 item is completed
 in two sittings rather than one. Flagged, not edited.
 
+### An undefined `$(macro)` in a bash step becomes a shell command, silently
+
+Build 10's frontend stage failed with two lines that describe the same fault at different
+distances from it:
+
+    line 41: tenantId: command not found
+    Error: Missing required build variables: VITE_TENANT_ID
+
+`VITE_TENANT_ID="$(tenantId)"` assumed a pipeline variable named `tenantId`. There was none
+— `tenantId` is a *Bicep* parameter, defaulting to `subscription().tenantId`, which is why
+it worked everywhere else and only failed here.
+
+**Why this is worth an entry rather than a one-line fix.** Azure DevOps leaves an
+unrecognised `$(name)` in the script text verbatim. Bash then reads it as command
+substitution, tries to run a program called `tenantId`, fails, and substitutes the empty
+string. Under `set -euo pipefail` this still does not abort, because the assignment was an
+environment prefix on another command and the prefix's failure is not the command's.
+
+So the default behaviour is: a typo'd or undefined variable becomes an empty value, quietly,
+in a script that is otherwise configured to fail fast. It surfaces wherever the empty value
+eventually matters, which can be a long way from the cause.
+
+**What caught it.** The `VITE_` variable check in `vite.config.ts`, which fails the build
+naming the missing variable. Without it the frontend would have deployed with
+`authority: https://login.microsoftonline.com/undefined`, and the failure would have been a
+sign-in button that does nothing — no server-side error, nothing in any log. That check
+earned its place on its first real run.
+
+**The systematic version.** Every `$(name)` in the pipeline can be cross-checked against the
+`variables` block, each stage's `variables`, and the ADO built-in prefixes
+(`Build.`, `Agent.`, `Pipeline.`, `System.`, `Common.`). Doing that across the whole file
+found exactly one unresolved macro — this one — and confirmed the other twenty-seven
+resolve. It is worth re-running after adding any stage, because the failure mode is silence
+rather than an error.
+
+A related check in the same family: extracting each bash `inlineScript` and running
+`bash -n` over it. That caught mangled line continuations in the same commit, which would
+otherwise have failed in the same stage on the next run.
+
 ### The frontend build fails on a missing variable rather than shipping `undefined`
 
 `vite.config.ts` checks all five `VITE_` variables in production mode and throws. A missing

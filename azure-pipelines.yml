@@ -42,6 +42,11 @@ variables:
   # docs/decisions.md, "Spike 3 — app registrations and the PKCE flow".
   apiClientId: '90a27142-cffb-4879-873a-bc0a99112ce7'
 
+  # The Entra tenant. Bicep defaults its own tenantId parameter to subscription().tenantId
+  # and does not need this, but the frontend build does — MSAL's authority is built from it
+  # — and a pipeline variable is the only way it reaches npm. Public identifier.
+  tenantId: '8edd202c-5474-4669-9b35-253da7a27cd2'
+
   # The coupon-spa registration, created on Day 0. Public identifier, like apiClientId.
   spaClientId: '04a724e0-6bd9-4285-ab7f-b00d2ce30e2c'
 
