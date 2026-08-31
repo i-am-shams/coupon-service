@@ -1683,3 +1683,50 @@ is the confusion the status-code section exists to prevent. And `AGENTS.md`'s co
 told an agent to validate the template with `--parameters @infra/params.json`, a file that
 has never existed; the pipeline builds the argument list inline because two of the values are
 only knowable at deploy time. It now shows that.
+
+### The APIM purge had never run, and would not have worked
+
+The headline claim of this project is that deleting the resource group and re-running the
+pipeline produces a working system. One step stands between that claim and a green
+pipeline: the purge of the soft-deleted API Management service, because `az group delete`
+does not free an APIM name for 48 hours.
+
+**That step had never executed.** Checked against Azure rather than against the log: every
+resource in `rg-coupon-service` was created between `2026-08-27T13:31:08Z` and `13:34:28Z`
+and had existed continuously since, and the seventeen Bicep deployments after that were
+incremental updates onto them. The subscription's `deletedservices` list was empty and
+always had been. Build 19's provision log reads, like every run before it,
+`==> Purging any soft-deleted API Management service for this project` /
+`none found`.
+
+**And the code was wrong.** It used `az rest --method delete`. Purging a soft-deleted APIM
+service is a long-running ARM operation — `202 Accepted` plus an async-operation header,
+completing later — and `az rest` is a raw HTTP call that does not follow that header. So the
+step would have returned immediately and `az deployment group create` on the next line would
+have raced a purge still in flight, failing with exactly the "service name is not available"
+the step exists to prevent.
+
+Two changes:
+
+- `az apim deletedservice purge`, which polls the operation to completion. The service name
+  and location come out of the deleted service's resource id by parameter expansion rather
+  than `sed`, because the id's shape is fixed and one less external command is one less
+  thing to escape.
+- A `checkNameAvailability` poll afterwards, because the CLI waiting for the purge and ARM
+  releasing the reserved name are two different events. It asks precisely the question the
+  deployment is about to ask, thirty times at ten-second intervals, and fails the stage with
+  a message naming the cause if the answer is still no.
+
+No `$(( ))` arithmetic anywhere in the block. Azure DevOps leaves an unrecognised `$(name)`
+in the script text verbatim so it would have been harmless, but this project has already
+lost a cycle to a `$(macro)` that silently became an empty string under `set -euo pipefail`,
+and the attempt number carries the same information as the elapsed seconds. Both bash
+`inlineScript` blocks were extracted and run through `bash -n`, which is the check
+`deployment.md` §6 prescribes after touching a stage, and the macro cross-check found
+nothing unresolved outside comments.
+
+**The general point, and it is the sharpest one in this audit:** a conditional that has
+never been true is not tested by any number of green runs. Eleven green pipelines said
+nothing whatsoever about the branch the entire claim rests on, because they all took the
+`else`. The only way to find that out is to look at what the branch would have done, or to
+make it happen.

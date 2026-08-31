@@ -191,19 +191,71 @@ stages:
           #
           # Without this step, "delete the resource group and run the pipeline" does not
           # produce a working system, which is the acceptance test for this project.
+          #
+          # `az apim deletedservice purge`, NOT `az rest --method delete`. The purge is a
+          # long-running ARM operation: it answers 202 with an async-operation header and
+          # completes some time later. `az rest` is a raw HTTP call that does not follow
+          # that header, so it returned immediately and the Bicep deployment below raced a
+          # purge still in flight — failing with exactly the "service name is not
+          # available" this step exists to prevent. The `az apim` command polls it.
+          #
+          # This branch had never run before 2026-08-30. Every previous execution found
+          # nothing and logged "none found", because the resource group had never actually
+          # been deleted — so the one step the headline claim rests on was the one step no
+          # run had exercised. See docs/decisions.md, phase G.
           # ---------------------------------------------------------------------------
           echo "==> Purging any soft-deleted API Management service for this project"
-          DELETED=$(az rest --method get \
-            --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.ApiManagement/deletedservices?api-version=2022-08-01" \
-            --query "value[?starts_with(name, 'apim-$(namePrefix)-$(environmentName)-')].id" -o tsv || true)
+          DELETED=$(az apim deletedservice list \
+            --query "[?starts_with(name, 'apim-$(namePrefix)-$(environmentName)-')].id" -o tsv || true)
 
-          if [ -n "${DELETED}" ]; then
-            for id in ${DELETED}; do
-              echo "    purging ${id}"
-              az rest --method delete --url "https://management.azure.com${id}?api-version=2022-08-01" --output none
-            done
-          else
+          if [ -z "${DELETED}" ]; then
             echo "    none found"
+          else
+            for id in ${DELETED}; do
+              # The id is
+              #   /subscriptions/<sub>/providers/Microsoft.ApiManagement/locations/<loc>/deletedservices/<name>
+              # and purge takes the name and the location as separate arguments.
+              APIM_NAME="${id##*/}"
+              APIM_LOCATION="${id%/deletedservices/*}"
+              APIM_LOCATION="${APIM_LOCATION##*/}"
+
+              echo "    purging ${APIM_NAME} (${APIM_LOCATION})"
+              az apim deletedservice purge \
+                --service-name "${APIM_NAME}" \
+                --location "${APIM_LOCATION}" \
+                --output none
+
+              # Belt and braces. The CLI waits for the purge operation itself, but ARM
+              # releases the reserved name behind it. checkNameAvailability asks exactly
+              # the question the deployment is about to ask, so ask it here — where a
+              # failure says what it means, instead of arriving as a template error.
+              echo "    waiting for the name to be released"
+              NAME_FREE=false
+              for attempt in $(seq 1 30); do
+                AVAILABLE=$(az rest --method post \
+                  --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.ApiManagement/checkNameAvailability?api-version=2022-08-01" \
+                  --headers "Content-Type=application/json" \
+                  --body "{\"name\":\"${APIM_NAME}\",\"type\":\"Microsoft.ApiManagement/service\"}" \
+                  --query nameAvailable -o tsv 2>/dev/null || echo "false")
+
+                # No $(( )) arithmetic anywhere in this block on purpose. Azure DevOps
+                # leaves an unrecognised $(name) in the script text verbatim, which is
+                # benign here — but this project has already lost a cycle to a $(macro)
+                # that silently became an empty string, and the attempt number says
+                # everything the elapsed seconds would.
+                if [ "${AVAILABLE}" = "true" ]; then
+                  echo "    ${APIM_NAME} released (attempt ${attempt} of 30, 10s apart)"
+                  NAME_FREE=true
+                  break
+                fi
+                sleep 10
+              done
+
+              if [ "${NAME_FREE}" != "true" ]; then
+                echo "##vso[task.logissue type=error]${APIM_NAME} is still reserved 300s after its purge reported complete. The Bicep deployment would fail with 'service name is not available'. Re-run; if it persists the soft-delete has not been released and the 48-hour window applies."
+                exit 1
+              fi
+            done
           fi
 
           # ---------------------------------------------------------------------------

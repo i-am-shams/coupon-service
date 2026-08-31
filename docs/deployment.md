@@ -407,6 +407,29 @@ step, the project's acceptance test is false for the next two days after every t
 purge matches on the name **prefix**, because the exact name comes from `uniqueString` and is not
 computable outside ARM.
 
+**The purge itself was wrong until 2026-08-30, and the reason it survived that long is the
+interesting part.** It used `az rest --method delete`. Purging a soft-deleted API Management
+service is a *long-running* ARM operation: it answers `202 Accepted` with an async-operation
+header and finishes later. `az rest` is a raw HTTP call and does not follow that header, so the
+step returned instantly and the Bicep deployment on the next line raced a purge still in
+progress — failing with the exact message the step exists to prevent.
+
+**It survived because the branch had never executed.** Every run since the project began found
+nothing to purge and logged `none found`, because the resource group had never actually been
+deleted: every resource in it was created on 2026-08-27 and the seventeen deployments after that
+were incremental. So the single step the headline claim depends on was the single step no run had
+exercised, and a green pipeline said nothing about it either way.
+
+It now uses `az apim deletedservice purge`, which polls the operation to completion, and then
+polls `checkNameAvailability` on the exact name until ARM reports it free — because the CLI
+waiting for the purge and ARM releasing the reserved name are two different events. If the name
+is still held after five minutes the stage fails with a message saying so, rather than letting
+the template be the thing that discovers it.
+
+**The general point:** a conditional that has never been true is not tested by any number of
+green runs. It is code that has been compiled and never run, sitting in the middle of the claim
+the whole project is judged on.
+
 ### `stageDependencies` only reaches stages you directly depend on
 
 A deploy stage failed in seventeen seconds with `Error: Input required: appName`. It read
