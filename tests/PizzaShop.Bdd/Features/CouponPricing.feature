@@ -80,13 +80,11 @@ Feature: Coupon pricing
     Then the coupon should be rejected with reason "RedemptionLimitReached"
     And the total should equal the subtotal
 
-  @ignore
   Scenario: Previewing a coupon three times does not consume a redemption
     Given a coupon "PREVIEW10" with a redemption limit of 1
     When I preview the coupon "PREVIEW10" three times
     Then the coupon should still be valid on the fourth preview
 
-  @ignore
   Scenario: An order is priced from the server's own data, ignoring client claims
     Given I submit an order claiming a pizza costs 1.00 but the server has it at 10.00
     Then the order total should reflect the server price of 10.00

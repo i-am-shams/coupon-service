@@ -306,9 +306,55 @@ randomises access token lifetime between roughly 60 and 90 minutes to avoid flee
 clients re-authenticating in lockstep. The debugging heuristic still holds (a call that
 worked and now returns 401 is probably an expired token); the exact number does not.
 
-## Phase A — the coupon evaluator sees a subtotal, not a basket
+## Phase B — persistence, menu, logging, health checks (2026-08-27)
 
-approach.md §2 publishes the interface as `Evaluate(string code, Basket basket,
+### Local development database: LocalDB, not Docker
+
+`(localdb)\mssqllocaldb` is used for local development. It requires no Docker installation,
+no daemon, and no manual start; it wakes on first connection. This gives the fastest
+migration-apply cycle on a Windows dev machine. Docker is the right choice in CI; LocalDB
+is the right choice to unblock a developer immediately.
+
+### DatabaseCouponEvaluator adapter — evaluator unchanged, only source changes
+
+`CouponEvaluator` still takes `IEnumerable<CouponRecord>` and is fully testable without a
+database. `DatabaseCouponEvaluator` in Infrastructure implements `ICouponEvaluator`, fetches
+all coupons from the repository on each call, and delegates to a fresh `CouponEvaluator` with
+that data. Fetching all coupons per evaluation is a deliberate trade for simplicity in phase B;
+a caching layer (e.g. scoped per-request) would be the production answer.
+
+### ICouponRepository lives in Infrastructure, not in Coupons
+
+The repository interface is a persistence concern. Putting it in `PizzaShop.Coupons` would
+add a dependency from the domain project to infrastructure concepts. It belongs in
+`PizzaShop.Infrastructure` alongside its implementation.
+
+### Atomic redemption via ExecuteUpdateAsync
+
+Rule 4 requires a single SQL UPDATE. `ExecuteUpdateAsync` with a WHERE clause that includes
+the limit check produces exactly that — no EF change-tracker, no read before the write.
+
+### Migrations guarded by IsRelational() for test compatibility
+
+Program.cs wraps `MigrateAsync()` and the seeder in `if (db.Database.IsRelational())`. This
+lets WebApplicationFactory-based BDD tests use an in-memory provider without the startup
+failing — `MigrateAsync` throws on non-relational providers. The in-memory database is seeded
+explicitly by the test factory.
+
+### BDD persistence scenarios use WebApplicationFactory with in-memory EF Core
+
+The two previously @ignore scenarios now run through the real HTTP layer via
+`WebApplicationFactory<Program>`. The real database is replaced with an in-memory provider
+per scenario. Each test seeds its own data via `PizzaShopWebApplicationFactory.SeedDatabase`,
+called after `CreateClient()` (which starts the test server and initialises DI).
+
+### /health vs /health/ready separation
+
+`/health` (liveness) has no external check. A short database interruption must not restart a
+healthy app. `/health/ready` checks the `PizzaShopDbContext` and is the target for readiness
+probes. Both are registered but neither is exposed through APIM — that is phase C.
+
+## Phase A — the coupon evaluator sees a subtotal, not a basket
 DateTimeOffset asOf)`. The implementation passes a `CouponBasket(decimal Subtotal)`
 instead. Recording the divergence because the approved design document says otherwise
 and a reviewer will read it.
