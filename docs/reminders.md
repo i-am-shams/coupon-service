@@ -5,15 +5,20 @@ when, and — more usefully — what the failure looks like when it does.
 
 ---
 
-## Azure DevOps PAT — expires 2026-09-25
+## Azure DevOps PAT — expires 2026-11-25
 
 Held in the `PERSONAL_ACCESS_TOKEN` user environment variable, base64-encoded as
 `":" + <pat>` (see `docs/decisions.md`, "The Azure DevOps MCP server's PAT mode expects
 a pre-encoded credential"). It authenticates the Azure DevOps MCP server, which is how
 failed pipeline runs get diagnosed from the terminal.
 
-Created 2026-08-26 with the 30-day default lifetime. **2026-09-25 falls inside the
-project window**, so this will expire mid-build rather than after it.
+Created 2026-08-27 with a 90-day lifetime, scoped to Code (Read), Build (Read) and
+Project and Team (Read) — the three the MCP server's `core`, `repositories` and
+`pipelines` domains need, and nothing more.
+
+The first token was issued with the 30-day default, which would have expired on
+2026-09-25 — inside the project window. Regenerating at 90 days moves the expiry
+past the assignment rather than into the middle of it.
 
 ### What the failure looks like
 
@@ -35,8 +40,15 @@ Invoke-RestMethod -Uri "https://dev.azure.com/khalid-shams/_apis/projects?api-ve
 `200` with the project list means the token is alive and the problem is elsewhere.
 `401` here, when the encoding is known-good, means the token expired.
 
-Renew at https://dev.azure.com/khalid-shams/_usersSettings/tokens — then re-encode
-before storing, or it will fail in the way described above.
+Renew at https://dev.azure.com/khalid-shams/_usersSettings/tokens, then run
+`infra/scripts/set-ado-pat.ps1`. That script validates the token against Azure DevOps
+*before* storing it, so a bad paste fails immediately with a specific reason rather
+than being written and surfacing later as an auth error. Do not hand-roll the
+encoding — three attempts at it by hand produced two silently empty values.
+
+Restart Claude Code fully afterwards. The MCP server inherits its environment from
+the Claude Code process, which captured it at launch, so an MCP reconnect alone does
+not pick up a new value.
 
 ### Why a PAT rather than `az login`
 
