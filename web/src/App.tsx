@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useMsal, useIsAuthenticated } from '@azure/msal-react';
 import { InteractionRequiredAuthError } from '@azure/msal-browser';
 import { api, ApiError, type MenuItem, type CouponValidationResponse, type OrderResponse } from './api/client';
@@ -12,11 +12,11 @@ const money = (n: number) => `€${n.toFixed(2)}`;
 export function App() {
   const { instance, accounts } = useMsal();
   const isAuthenticated = useIsAuthenticated();
-  const { lines, setQuantity, quantityOf, clear, itemCount } = useBasket();
+  const { lines, setQuantity, quantityOf, clear, itemCount, couponCode, setCouponCode } = useBasket();
 
   const [menu, setMenu] = useState<MenuItem[]>([]);
   const [menuError, setMenuError] = useState<string | null>(null);
-  const [couponCode, setCouponCode] = useState('');
+  const [menuLoading, setMenuLoading] = useState(true);
   const [preview, setPreview] = useState<CouponValidationResponse | null>(null);
   const [order, setOrder] = useState<OrderResponse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -24,11 +24,48 @@ export function App() {
   const [devToken, setDevToken] = useState<string | null>(null);
 
   // Anonymous. No MSAL interaction on load — nobody signs in to look at a menu.
-  useEffect(() => {
-    api.getMenu()
-      .then(setMenu)
-      .catch((e: ApiError) => setMenuError(`${e.message}${e.correlationId ? ` (correlation ${e.correlationId})` : ''}`));
+  //
+  // It retries, and that is the point rather than a refinement. The backend is a B1 App
+  // Service whose first boot after a deployment was measured at 212 seconds: about 110s
+  // of CA certificate rehashing before .NET starts at all, then EF migrations and seeding
+  // against a 5 DTU database. A single attempt on mount lands inside that window, sets an
+  // error, and then sits there — the customer sees a broken shop and the only way out is
+  // a manual refresh they have no reason to think of.
+  //
+  // The pipeline's smoke test already polls for up to 420 seconds for exactly this
+  // reason. The page a customer actually looks at was the one place that did not.
+  const loadMenu = useCallback(async () => {
+    setMenuLoading(true);
+    setMenuError(null);
+
+    // ~55 seconds total. Long enough to cover a warm start and most of a cold one;
+    // short enough that a genuinely broken backend does not hold someone indefinitely.
+    // After that it hands over to a button rather than telling them to refresh.
+    const backoffMs = [1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000];
+
+    for (let attempt = 0; ; attempt++) {
+      try {
+        setMenu(await api.getMenu());
+        setMenuError(null);
+        setMenuLoading(false);
+        return;
+      } catch (e) {
+        if (attempt >= backoffMs.length) {
+          const err = e as ApiError;
+          setMenuError(
+            `${err.message}${err.correlationId ? ` (correlation ${err.correlationId})` : ''}`,
+          );
+          setMenuLoading(false);
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, backoffMs[attempt]));
+      }
+    }
   }, []);
+
+  useEffect(() => {
+    void loadMenu();
+  }, [loadMenu]);
 
   // A preview is a hint, not a promise. It consumes no redemption and the server
   // recalculates from scratch at submission, so the two can legitimately disagree.
@@ -44,6 +81,22 @@ export function App() {
       setBusy(false);
     }
   }, [couponCode, lines]);
+
+  // Re-run the preview once when a coupon code comes back from sessionStorage after the
+  // sign-in redirect. Restoring the code into the input is necessary but not sufficient:
+  // without this the customer returns to a filled-in coupon field and no preview beside
+  // it, which reads as "the coupon is no longer being applied" at the exact moment they
+  // are deciding whether to commit.
+  //
+  // Safe to do automatically because the preview is read-only — it consumes no redemption
+  // and has no side effect. It waits for the menu so it cannot race the initial load.
+  const restoredPreviewRan = useRef(false);
+  useEffect(() => {
+    if (restoredPreviewRan.current) return;
+    if (menu.length === 0 || !couponCode || lines.length === 0) return;
+    restoredPreviewRan.current = true;
+    void checkCoupon();
+  }, [menu, couponCode, lines, checkCoupon]);
 
   const placeOrder = useCallback(async () => {
     if (lines.length === 0) return;
@@ -100,7 +153,19 @@ export function App() {
         )}
       </header>
 
-      {menuError && <p className="error">Could not load the menu: {menuError}</p>}
+      {menuLoading && menu.length === 0 && (
+        <p className="hint">
+          Loading the menu… if the service has been idle this can take up to a minute while it
+          starts up.
+        </p>
+      )}
+
+      {menuError && (
+        <p className="error">
+          Could not load the menu: {menuError}{' '}
+          <button onClick={() => void loadMenu()}>Try again</button>
+        </p>
+      )}
 
       <section>
         <h2>Menu</h2>

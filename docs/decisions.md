@@ -1286,3 +1286,97 @@ otherwise have failed in the same stage on the next run.
 one would otherwise become `undefined` in the bundle and surface as a sign-in that silently
 does nothing, or a 401 that reads like a gateway problem. Failing the build names the
 variable instead.
+
+## Phase F — documentation, hardening, and what using the app found (2026-08-28)
+
+### The deliverable documents were extracted, and the extraction caught a contradiction
+
+The four documents were assembled from approach.md and decisions.md as planned rather
+than written fresh. Reading approach.md end to end for that pass found §4's worked
+example still showing a 27.00 subtotal for a basket the seeded menu prices at 31.50 —
+`pizzaId 1 ×2` at 10.00 plus `pizzaId 3 ×1` at 11.50. Corrected against the live menu.
+
+That is the second contradiction an end-to-end read has found in that document which a
+section-by-section read did not. Worth remembering the next time the reconciliation pass
+looks skippable.
+
+### Two API defects found by probing the deployment, not by reading the code
+
+Both were found by calling the deployed gateway with deliberately awkward bodies.
+
+    POST /coupons/validate {"couponCode":"PIZZA10"}   -> 500
+    POST /coupons/validate quantity 2000000000        -> 200, subtotal 20000000000.00
+
+**The 500 is the one that mattered.** A non-nullable reference type on a record property
+is a compile-time annotation and nothing more; `System.Text.Json` does not enforce it, so
+an absent `items` bound as null and the endpoint threw. A malformed request surfacing as a
+server fault contradicts the contract all four deliverable documents state — 4xx for a bad
+request, 5xx for a real fault — and a reviewer with curl finds it in a minute.
+
+Fixing the documents to describe a 500 would have been the wrong direction. `Items` is now
+nullable so the compiler requires the check, and `BasketRequestValidation` answers null and
+empty with a 400.
+
+The bounds (50 per line, 50 lines) live in `Basket.FromLinesAsync` beside the existing
+quantity check, so they hold for anything that builds a basket rather than only for what
+arrives over HTTP. The line cap is not only arithmetic: `IMenu.GetUnitPriceAsync` is one
+database round trip per line, and for an order the whole loop runs inside the redemption
+transaction against a 5 DTU database.
+
+### The positive order path is now proven, and the policy was read back to prove it
+
+A manual PKCE sign-in produced a 201 with the token's claims checked rather than assumed:
+bare client-ID `aud`, v2 `iss` with no trailing slash, `scp` containing `Orders.Write`,
+`roles` absent, `ver` 2.0.
+
+The claims panel alone would have been partly circular — it compares the token against the
+same `.env.local` values used to build the app. So the deployed operation policy was read
+back out of API Management, and it pins those same strings and carries
+
+    token-value="@((string)context.Variables.GetValueOrDefault<string>("callerToken", ""))"
+
+`token-value`, not `header-name`. That is direct evidence for what the phase D entry above
+established only by inference from Application Insights failure reasons.
+
+### Three frontend defects, all found by using the app rather than reading it
+
+Recorded together because they share a cause: the frontend had been reviewed for its
+authentication flow and verified through the API, and never actually looked at.
+
+**The − and + buttons rendered invisibly.** `styles.css` declared
+`color-scheme: light dark` while every surface in it is a hardcoded light value. That
+declaration makes the browser resolve UA system colours for the user's preference, so on a
+machine in dark mode `buttontext` became near-white while `.stepper button` kept its
+explicit `background: #fff`. White glyphs on a white button. The Check button had the same
+defect; `.primary` escaped only because it sets its own colour.
+
+Declaring `color-scheme: light` is the truthful fix, and explicit `color` on button and
+input makes it independent of that declaration. A second defect surfaced alongside it: the
+stepper buttons inherited the generic `button` padding and, with no `box-sizing`
+declaration anywhere, rendered around 3.8rem wide rather than square.
+
+**The menu needed a manual refresh.** `useEffect` called `getMenu()` once with no retry, so
+a load landing inside a cold start set an error and stayed there. The pipeline's smoke test
+polls for up to 420 seconds because a first boot was measured at 212; the page a customer
+actually looks at was the one place that did not. It now retries with backoff over ~55s,
+says the service may be starting, and offers a button rather than expecting a refresh
+nobody would think of.
+
+**The coupon code was lost across the sign-in redirect, and lost silently.** The basket was
+persisted in sessionStorage and the coupon code was not. After sign-in the order submitted
+with `couponCode: null`, which `PricingService` prices at full price with
+`RejectionReason: null` — nothing was asked about, so nothing was rejected. The
+confirmation only explains a missing discount when there *is* a rejection reason, so the
+customer was charged full price and told nothing.
+
+**This is a worse failure than the one the original design guarded against.** An empty
+basket after sign-in is visible and the customer rebuilds it; a missing discount is not,
+and it disappears at the moment they have stopped checking. `SPEND50` on a 75.00 basket
+lost 11.25 in silence. The code is now persisted alongside the basket, the preview re-runs
+once on return so the figure shown matches what will be submitted, and `clear()` empties
+both so a code cannot survive into the next order.
+
+**The general lesson, for the record:** every automated check in this project passes against
+an application whose buttons are invisible and whose discounts silently vanish. Smoke tests
+assert on the response body, and the BDD suite exercises real routing and pricing — neither
+of them looks at the thing a customer looks at.

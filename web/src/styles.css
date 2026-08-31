@@ -1,4 +1,19 @@
-:root { color-scheme: light dark; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+/*
+  color-scheme is `light`, not `light dark`.
+
+  Every surface below is a hardcoded light value (#faf8f5, #fff, #1c1a17), so declaring
+  support for dark was simply untrue — and it broke the page rather than merely looking
+  odd. `light dark` tells the browser to resolve UA system colours for the user's
+  preference, so on a machine in dark mode `buttontext` became a near-white colour while
+  `.stepper button` and `button` kept their explicit `background: #fff`. The result was
+  white glyphs on a white button: the − and + controls, and the Check button's label,
+  rendered invisible. `.primary` escaped it only because it sets its own colour.
+
+  Declaring `light` keeps UA widget colours consistent with the palette the page actually
+  paints. The explicit `color` on button and input below makes it robust rather than
+  dependent on that declaration alone.
+*/
+:root { color-scheme: light; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
 body { margin: 0; background: #faf8f5; color: #1c1a17; }
 main { max-width: 46rem; margin: 0 auto; padding: 1.5rem; }
 header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; border-bottom: 1px solid #e5ded4; padding-bottom: .75rem; }
@@ -10,11 +25,11 @@ h2 { font-size: 1.1rem; margin: 1.75rem 0 .5rem; }
 .menu p { margin: .15rem 0 0; font-size: .85rem; color: #6b6259; }
 .price { font-variant-numeric: tabular-nums; }
 .stepper { display: flex; align-items: center; gap: .5rem; }
-.stepper button { width: 1.9rem; height: 1.9rem; border: 1px solid #d6cec3; background: #fff; border-radius: .3rem; cursor: pointer; font-size: 1rem; }
+.stepper button { width: 1.9rem; height: 1.9rem; padding: 0; border: 1px solid #d6cec3; background: #fff; color: #1c1a17; border-radius: .3rem; cursor: pointer; font-size: 1rem; line-height: 1; }
 .stepper span { min-width: 1.2rem; text-align: center; font-variant-numeric: tabular-nums; }
 .coupon { display: flex; gap: .5rem; }
-.coupon input { flex: 1; padding: .45rem .6rem; border: 1px solid #d6cec3; border-radius: .3rem; font: inherit; }
-button { padding: .45rem .9rem; border: 1px solid #d6cec3; background: #fff; border-radius: .3rem; cursor: pointer; font: inherit; }
+.coupon input { flex: 1; padding: .45rem .6rem; border: 1px solid #d6cec3; background: #fff; color: #1c1a17; border-radius: .3rem; font: inherit; }
+button { padding: .45rem .9rem; border: 1px solid #d6cec3; background: #fff; color: #1c1a17; border-radius: .3rem; cursor: pointer; font: inherit; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button.primary { background: #1c1a17; color: #fff; border-color: #1c1a17; padding: .6rem 1.2rem; margin-top: 1rem; }
 .preview, .confirmation { margin-top: .75rem; padding: .75rem 1rem; border-radius: .4rem; border: 1px solid #e5ded4; background: #fff; }
@@ -27,3 +42,4 @@ dd { margin: 0; }
 .claims table { border-collapse: collapse; width: 100%; }
 .claims td { padding: .2rem .5rem .2rem 0; vertical-align: top; }
 .claims code { word-break: break-all; }
+.hint { font-size: .9rem; color: #6b6259; }
