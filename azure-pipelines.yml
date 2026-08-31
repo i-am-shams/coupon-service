@@ -298,7 +298,13 @@ stages:
 # =====================================================================================
 - stage: DeployBackend
   displayName: '4 · Deploy backend'
-  dependsOn: GrantDbAccess
+  # Provision is listed even though GrantDbAccess already depends on it. stageDependencies
+  # exposes only stages this one DIRECTLY depends on — a transitive dependency resolves to
+  # an empty string, silently, and the failure surfaces in whatever task consumed the
+  # variable ("Input required: appName") rather than at the reference.
+  dependsOn:
+    - Provision
+    - GrantDbAccess
   condition: succeeded()
   variables:
     appServiceName: $[ stageDependencies.Provision.Provision.outputs['deploy.appServiceName'] ]
@@ -309,6 +315,18 @@ stages:
 
     - download: current
       artifact: api
+
+    # An empty stage output reaches the deploy task as a missing input, and the resulting
+    # "Input required: appName" says nothing about where the value should have come from.
+    # This names the cause instead. Phase E adds stages; this is the failure they will hit.
+    - script: |
+        set -e
+        if [ -z "$(appServiceName)" ]; then
+          echo "##vso[task.logissue type=error]appServiceName is empty. The Provision stage output did not resolve — check that this stage lists Provision in dependsOn."
+          exit 1
+        fi
+        echo "Deploying to $(appServiceName)"
+      displayName: 'Check the provision outputs resolved'
 
     - task: AzureWebApp@1
       displayName: 'Deploy to App Service'
@@ -341,7 +359,11 @@ stages:
 # =====================================================================================
 - stage: SmokeTest
   displayName: '6 · Smoke test'
-  dependsOn: DeployBackend
+  # Provision listed for the same reason as the deploy stage above: this stage reads its
+  # outputs, so it must depend on it directly.
+  dependsOn:
+    - Provision
+    - DeployBackend
   condition: succeeded()
   variables:
     apimServiceName: $[ stageDependencies.Provision.Provision.outputs['deploy.apimServiceName'] ]

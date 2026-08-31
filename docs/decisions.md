@@ -638,6 +638,31 @@ entry at all.
 bare application (client) ID. Easy Auth's `allowedAudiences` carries both forms, so the
 token validates either way; this simply stays on the documented path.
 
+### `stageDependencies` only reaches stages the current stage directly depends on
+
+Build 3's deploy stage failed in seventeen seconds with `Error: Input required: appName`.
+
+`DeployBackend` read `stageDependencies.Provision.Provision.outputs['deploy.appServiceName']`
+while declaring `dependsOn: GrantDbAccess`. `GrantDbAccess` depends on `Provision`, so the
+stage ran in the right order and the value looked like it should be reachable. It is not:
+a transitive dependency resolves to an **empty string**, with no warning at the reference.
+
+The tell was that stage 3 worked and stage 4 did not, using the identical expression form.
+Stage 3 declares `dependsOn: Provision` directly.
+
+**The failure mode.** An empty variable is not an error where it is referenced — it is an
+error wherever it is eventually consumed, stripped of any connection to its origin. Here it
+surfaced as a missing task input, which reads as a malformed task definition. `SmokeTest`
+had the same defect and would have failed next for a third apparently unrelated reason.
+
+`DeployBackend` and `SmokeTest` now list `Provision` alongside their ordering dependency.
+Adding it changes no ordering, because the dependency already existed transitively; it only
+makes the outputs visible.
+
+A guard step in the deploy stage now fails with a message naming the cause when
+`appServiceName` is empty. Phase E adds stages that will read the same outputs, and this is
+the mistake they will make.
+
 ### The SQL administrator's object ID comes out of the ARM access token
 
 `Microsoft.Sql/servers`'s `administrators.sid` is the **object** ID — the resource schema
