@@ -65,7 +65,7 @@ benefit. `CouponBasket` carries a subtotal precisely so that it cannot see them.
 ### No item-scoped coupons
 
 "10% off pizzas only", buy-one-get-one, a category restriction, a minimum item count. All of them
-require reopening `ICouponEvaluator.Evaluate` to pass item data across the boundary. That is a
+require reopening `ICouponEvaluator.EvaluateAsync` to pass item data across the boundary. That is a
 deliberate design change with a visible cost, which is exactly what the signature was chosen to
 make it.
 
@@ -193,7 +193,7 @@ minutes so that fleets of clients do not re-authenticate in lockstep. The debugg
 call that worked and now 401s is probably an expired token — holds; the exact number does not.
 ### 12. The SQL firewall allows all of Azure, not just this deployment
 
-`infra/modules/sql.bicep` carries one firewall rule, `AllowAzure`, which is the
+`infra/modules/sql.bicep` carries one firewall rule, `AllowAllWindowsAzureIps`, which is the
 `0.0.0.0`–`0.0.0.0` special case meaning "allow Azure services". That is not a rule about
 *this* subscription: it permits connection attempts from any Azure resource in any tenant.
 

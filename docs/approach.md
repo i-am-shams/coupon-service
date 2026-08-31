@@ -32,7 +32,11 @@ One design rule: **the server decides the price.** The browser sends a basket. I
 ```csharp
 public interface ICouponEvaluator
 {
-    CouponEvaluation Evaluate(string code, CouponBasket basket, DateTimeOffset asOf);
+    Task<CouponEvaluation> EvaluateAsync(
+        string code,
+        CouponBasket basket,
+        DateTimeOffset asOf,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed record CouponBasket(decimal Subtotal);

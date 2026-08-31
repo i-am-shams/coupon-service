@@ -123,6 +123,37 @@ public sealed class PersistenceSteps : IDisposable
         _rawResponse = await _client.PostAsync("/api/v1/coupons/validate", content);
     }
 
+    [When(@"I submit an order with a coupon code of (\d+) characters")]
+    public async Task WhenOrderWithOverlongCouponCode(int length)
+    {
+        _factory = new PizzaShopWebApplicationFactory();
+        _client = _factory.CreateClient();
+        _factory.SeedDatabase(
+            pizzas: new[]
+            {
+                new PizzaEntity { Id = 1, Name = "Margherita", Description = "Test pizza", Price = 10.00m },
+            });
+
+        // Worth being explicit about what this scenario can and cannot prove.
+        //
+        // It does NOT reproduce the original crash. The suite runs on SQLite, which is
+        // dynamically typed and does not enforce VARCHAR length at all, so the oversized
+        // value would have been stored happily and the order would have returned 201.
+        // The production failure needs SQL Server, which no test here uses.
+        //
+        // It still has teeth: before the guard existed this returned 201, and it now
+        // returns 400. What it pins is the validation, which is the thing that has to
+        // hold. The class of bug — a schema constraint the tests structurally cannot
+        // see — is recorded in docs/decisions.md rather than papered over here.
+        var code = new string('A', length);
+        var json = $$"""
+            { "couponCode": "{{code}}", "items": [ { "pizzaId": 1, "quantity": 1 } ] }
+            """;
+
+        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        _rawResponse = await _client.PostAsync("/api/v1/orders", content);
+    }
+
     // ── Then ──────────────────────────────────────────────────────────────
 
     [Then(@"the response status should be (\d+)")]

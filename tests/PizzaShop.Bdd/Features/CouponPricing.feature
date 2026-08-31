@@ -104,3 +104,12 @@ Feature: Coupon pricing
       | 1       | 2000000000    |
     When I price the basket without a coupon expecting it to be refused
     Then pricing should be refused because the quantity is out of range
+
+  # Found by an adversarial review, and it is the same defect class as the missing
+  # items array: a schema constraint with no matching request validation. The code
+  # evaluated as NotFound, was written onto the order anyway, and met nvarchar(50)
+  # inside SaveChangesAsync.
+  Scenario: A coupon code longer than the schema allows is rejected as a bad request
+    When I submit an order with a coupon code of 60 characters
+    Then the response status should be 400
+    And the response should not be a server error

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using PizzaShop.Infrastructure.Entities;
+using PizzaShop.Coupons;
 
 namespace PizzaShop.Infrastructure.Configurations;
 
@@ -10,7 +11,7 @@ public sealed class CouponRedemptionConfiguration : IEntityTypeConfiguration<Cou
     {
         builder.ToTable("CouponRedemptions");
         builder.HasKey(r => r.Id);
-        builder.Property(r => r.CouponCode).IsRequired().HasMaxLength(50);
+        builder.Property(r => r.CouponCode).IsRequired().HasMaxLength(CouponCodeRules.MaxLength);
         builder.Property(r => r.RedeemedAt).IsRequired();
         builder.HasOne(r => r.Order)
                .WithMany()

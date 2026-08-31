@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using PizzaShop.Infrastructure.Entities;
+using PizzaShop.Coupons;
 
 namespace PizzaShop.Infrastructure.Configurations;
 
@@ -10,7 +11,7 @@ public sealed class CouponConfiguration : IEntityTypeConfiguration<CouponEntity>
     {
         builder.ToTable("Coupons");
         builder.HasKey(c => c.Id);
-        builder.Property(c => c.Code).IsRequired().HasMaxLength(50);
+        builder.Property(c => c.Code).IsRequired().HasMaxLength(CouponCodeRules.MaxLength);
         builder.HasIndex(c => c.Code).IsUnique();
         builder.Property(c => c.Type).IsRequired();
         builder.Property(c => c.Value).HasColumnType("decimal(18,2)");

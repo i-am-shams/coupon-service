@@ -24,7 +24,7 @@ public static class CouponEndpoints
         ILogger<CouponValidationRequest> logger)
     {
         // A malformed request is a 400, never a 500. See BasketRequestValidation.
-        if (BasketRequestValidation.Validate(request.Items) is { } invalidBasket)
+        if (BasketRequestValidation.Validate(request.CouponCode, request.Items) is { } invalidBasket)
         {
             return invalidBasket;
         }

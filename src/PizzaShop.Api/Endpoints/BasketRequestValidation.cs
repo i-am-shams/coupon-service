@@ -1,3 +1,5 @@
+using PizzaShop.Coupons;
+
 namespace PizzaShop.Api.Endpoints;
 
 /// <summary>
@@ -28,11 +30,28 @@ namespace PizzaShop.Api.Endpoints;
 internal static class BasketRequestValidation
 {
     /// <summary>
-    /// Returns a 400 <c>ProblemDetails</c> result when the request carries no usable
-    /// basket, or <see langword="null"/> when it does and the caller may proceed.
+    /// Returns a 400 <c>ProblemDetails</c> result when the request is not usable, or
+    /// <see langword="null"/> when it is and the caller may proceed.
     /// </summary>
-    public static IResult? Validate(IReadOnlyList<BasketLineRequest>? items)
+    public static IResult? Validate(string? couponCode, IReadOnlyList<BasketLineRequest>? items)
     {
+        // Checked before the basket, because it is cheaper and because leaving it until
+        // after was how it got missed the first time.
+        //
+        // A code is optional — no coupon is a valid order. An over-long one is not, and
+        // the failure it used to produce was a 500: it evaluated as NotFound, was written
+        // onto the order anyway (a rejected coupon is still recorded), and met the
+        // nvarchar(50) column inside SaveChangesAsync. See CouponCodeRules for why the
+        // limit now lives in one place instead of only in the schema.
+        if (couponCode is not null && couponCode.Length > CouponCodeRules.MaxLength)
+        {
+            return Results.Problem(
+                title: "Invalid coupon code",
+                detail: $"A coupon code may be at most {CouponCodeRules.MaxLength} characters. "
+                      + $"The submitted code was {couponCode.Length}.",
+                statusCode: 400);
+        }
+
         if (items is null)
         {
             return Results.Problem(

@@ -67,7 +67,11 @@ This is what the brief asks about most directly, so it comes first and in full.
 ```csharp
 public interface ICouponEvaluator
 {
-    CouponEvaluation Evaluate(string code, CouponBasket basket, DateTimeOffset asOf);
+    Task<CouponEvaluation> EvaluateAsync(
+        string code,
+        CouponBasket basket,
+        DateTimeOffset asOf,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed record CouponBasket(decimal Subtotal);
@@ -115,7 +119,7 @@ Ordering                                       Coupons
 --------                                       -------
 1. resolve unit prices from the menu
 2. compute the subtotal
-3. --- Evaluate(code, subtotal, now) ------>   4. find the coupon
+3. --- EvaluateAsync(code, subtotal, now) -->   4. find the coupon
                                                5. check expiry / minimum / limit
                                                6. compute and round the discount
                                                7. cap the discount at the subtotal
@@ -129,7 +133,7 @@ would exist in two places; if the coupon side returned a final total, it would n
 pizza prices and delivery, which turns it into a second ordering service.
 
 **The discount cap is enforced twice**, in `CouponEvaluator.CalculateDiscount` and again as
-`Math.Max(0m, ...)` in `PricingService.Price`. The second is redundant given the first, and it
+`Math.Max(0m, ...)` in `PricingService.PriceAsync`. The second is redundant given the first, and it
 stays: it is the structural invariant, so a future evaluator that forgets the cap still cannot
 produce a negative total.
 
@@ -190,7 +194,7 @@ a distributed-systems problem rather than a code-organisation one.
 This is enforced by construction rather than by review:
 
 - `Basket` has no public constructor. `BasketItem`'s constructor is `internal`.
-- The only way to obtain a priced basket is `Basket.FromLines(IEnumerable<BasketLine>, IMenu)`,
+- The only way to obtain a priced basket is `Basket.FromLinesAsync(IEnumerable<BasketLine>, IMenu)`,
   which reads each unit price from the menu.
 - `BasketLine` carries `PizzaId` and `Quantity` and has no field a price could arrive in.
 
@@ -201,7 +205,7 @@ error CS1729: 'BasketItem' does not contain a constructor that takes 3 arguments
 ```
 
 So binding a request DTO onto a priced basket fails the build rather than passing review.
-`FromLines` also rejects a quantity below one — a negative quantity would subtract from the
+`FromLinesAsync` also rejects a quantity below one — a negative quantity would subtract from the
 subtotal, which is the same class of problem as accepting a price and would otherwise have been
 reachable through a perfectly valid-looking request.
 
@@ -240,7 +244,7 @@ not begin holding entities the failed attempt added.
 |---|---|
 | `Pizzas` | Menu: name, description, price. Seeded at startup. |
 | `Coupons` | Code, type, value, description, expiry, minimum order value, redemption limit, usage count. |
-| `Orders` | Timestamp, subtotal, discount, total, coupon code, whether it applied, rejection reason. |
+| `Orders` | Timestamp, subtotal, discount, total, coupon code, whether it applied. |
 | `OrderLines` | Pizza, quantity, unit price captured at order time. |
 | `CouponRedemptions` | Audit trail: which order consumed which redemption, and when. |
 

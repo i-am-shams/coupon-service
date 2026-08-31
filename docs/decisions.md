@@ -2,7 +2,7 @@
 
 ### CouponBasket carries only the subtotal
 
-`ICouponEvaluator.Evaluate` receives a `CouponBasket(decimal Subtotal)` rather than
+`ICouponEvaluator.EvaluateAsync` receives a `CouponBasket(decimal Subtotal)` rather than
 the full `Basket`. A coupon rule needs nothing but the basket value; passing the full
 basket would give the coupon project visibility into pizza IDs and prices, breaking the
 dependency boundary.
@@ -22,7 +22,7 @@ rounding (€0.005 rounds up to €0.01).
 ### Discount cap enforced in two places
 
 `CouponEvaluator.CalculateDiscount` caps the rounded discount at the subtotal.
-`PricingService.Price` also floors the total at zero via `Math.Max(0m, ...)`.
+`PricingService.PriceAsync` also floors the total at zero via `Math.Max(0m, ...)`.
 The second guard is redundant given the first, but it is the structural invariant the
 brief requires — even if a future evaluator implementation skips the cap, the total
 cannot go negative.
@@ -383,7 +383,7 @@ that document is next revised.
 ## Phase A — rule 1 is enforced by construction, not by convention
 
 `Basket` has no public constructor and `BasketItem`'s constructor is `internal`. The
-only way to obtain a priced basket is `Basket.FromLines(IEnumerable<BasketLine>, IMenu)`,
+only way to obtain a priced basket is `Basket.FromLinesAsync(IEnumerable<BasketLine>, IMenu)`,
 which reads every unit price from the menu. `BasketLine` carries `PizzaId` and
 `Quantity` and has no field a price could arrive in.
 
@@ -394,7 +394,7 @@ Verified by compiling a probe in `PizzaShop.Api` that tried to fabricate a price
 So binding a request DTO onto a priced basket is not something that can be written from
 outside the Ordering assembly — it fails the build rather than passing review.
 
-`FromLines` also rejects a quantity below one. A negative quantity would subtract from
+`FromLinesAsync` also rejects a quantity below one. A negative quantity would subtract from
 the subtotal, which is the same class of problem as accepting a price from the client
 and would otherwise have been reachable through a perfectly valid-looking request.
 
@@ -1380,3 +1380,84 @@ both so a code cannot survive into the next order.
 an application whose buttons are invisible and whose discounts silently vanish. Smoke tests
 assert on the response body, and the BDD suite exercises real routing and pricing — neither
 of them looks at the thing a customer looks at.
+
+## Phase F — adversarial review findings (2026-08-29)
+
+Four findings from an adversarial review, all real. One defect and three stale
+documentation references. The audit that followed found more of both kinds.
+
+### An over-long coupon code returned 500, and why the earlier validation pass missed it
+
+`OrderEntity.CouponCode` is `nvarchar(50)`. Nothing validated the incoming length, so a
+longer code evaluated as `NotFound`, was written onto the order anyway — a rejected coupon
+is still recorded — and threw when it met the column inside `SaveChangesAsync`. A malformed
+request reported as a server fault, which is exactly the contract violation the missing
+`items` array produced.
+
+**Why it was missed, which is more useful than the patch.** The earlier pass added
+`BasketRequestValidation` by looking at the request shape and asking what could be wrong
+with it. From that vantage the basket has visible rules — an array can be absent, empty, or
+absurdly large — and a string has none. **The 50 was in the schema and nowhere else.**
+Anyone adding `HasMaxLength` to a column has no reason to think about an endpoint, and
+anyone writing an endpoint guard has no reason to open an EF configuration. The two facts
+never had to agree because nothing made them meet.
+
+So the number now has one home, `CouponCodeRules.MaxLength`, referenced by all three EF
+configurations and by the request validation. Changing it changes the column and the guard
+together. The value is unchanged, so `has-pending-model-changes` reports none and no
+migration is needed.
+
+**The audit that followed, since one instance implies a class.** Every string column with a
+schema constraint was checked against the paths that write it:
+
+| Column | Constraint | Written from | Validated |
+|---|---|---|---|
+| `Orders.CouponCode` | 50 | **client request** | now, by the guard |
+| `CouponRedemptions.CouponCode` | 50, required | the matched coupon's own code | bounded by `Coupons.Code` |
+| `Coupons.Code` / `.Description` | 50 / 200 | seed data | no write endpoint exists |
+| `Pizzas.Name` / `.Description` | 100 / 500 | seed data | no write endpoint exists |
+
+`Orders.CouponCode` was the only client-reachable one. That is the whole class, and it is
+closed — but it is closed by there being no admin surface, so **the first endpoint that
+writes a coupon or a pizza reopens all of it.**
+
+### The test suite could not have caught this, and that is the sharper problem
+
+The scenario added for it asserts the guard, not the crash, because the crash is
+unreproducible here. The suite runs on **SQLite, which is dynamically typed and does not
+enforce `VARCHAR` length at all**. The oversized value would have been stored happily and
+the order would have returned 201. Only SQL Server throws, and no test uses it.
+
+So this is a defect class the BDD suite is structurally blind to: anything enforced by the
+production database and not by the provider the tests run against. The scenario still has
+teeth — verified by disabling the guard, which fails it — but it pins the validation rather
+than the underlying constraint.
+
+That is the cost of the SQLite decision recorded earlier in this log, and it was worth
+paying for `ExecuteUpdateAsync` and transactions. It is not free, and this is the invoice.
+
+### Ten stale code references, from the phase B sync-to-async change
+
+The review named three. Grepping every document for identifiers quoted from the code found
+ten, all the same root cause: phase B made the evaluator asynchronous and the documents kept
+the signature they were written against.
+
+- `ICouponEvaluator.Evaluate` → `EvaluateAsync` — approach.md §2, architecture.md §2 and its
+  sequence diagram, assumptions.md §2, decisions.md phase A
+- `Basket.FromLines` → `FromLinesAsync` — architecture.md §3 twice, decisions.md twice
+- `PricingService.Price` → `PriceAsync` — architecture.md §2, decisions.md phase A
+- `Orders` was listed as carrying a rejection reason column. It does not; `OrderEntity` has
+  `CouponCode` and `CouponApplied` and no reason.
+- One of mine from the previous commit: the SQL firewall rule was cited as `AllowAzure`; it
+  is `AllowAllWindowsAzureIps`.
+
+**Finding 3 is the one that matters.** `ICouponEvaluator` is the boundary the entire "one
+deployable, extractable later" argument rests on, and two documents published a contract
+that does not compile. A reviewer checking the central design claim against the source would
+have found the source disagreeing with it.
+
+**The general point:** prose and code drift silently, and quoted signatures drift worst
+because they look like evidence. The check that found the extra seven was mechanical —
+extract every identifier the documents quote, grep the source for each — and it takes
+seconds. It belongs in the same category as the `$(macro)` cross-check recorded above:
+cheap, boring, and it finds things reading does not.
