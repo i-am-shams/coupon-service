@@ -259,6 +259,39 @@ stages:
           fi
 
           # ---------------------------------------------------------------------------
+          # Log Analytics soft-delete.
+          #
+          # A deleted workspace is held for 14 days with its name reserved — the same shape
+          # of problem as the APIM purge above, with a different resolution, because there
+          # is no purge API for it. Recreating a workspace with the same name, in the same
+          # resource group and location, RECOVERS the soft-deleted one. That is exactly
+          # what this deployment does, and it is the outcome we want: the name and the
+          # workspace ID come back.
+          #
+          # So there is nothing to fix here, only something to say. It is checked rather
+          # than assumed because "it usually just works" is the phrase that covered the
+          # APIM purge for eleven green runs while that step was, in fact, broken. A
+          # soft-deleted workspace nobody mentioned would make a failed recovery look like
+          # a fresh provisioning fault, and send someone to the wrong layer.
+          # ---------------------------------------------------------------------------
+          echo "==> Checking for a soft-deleted Log Analytics workspace"
+          DELETED_WS=$(az rest --method get \
+            --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.OperationalInsights/deletedWorkspaces?api-version=2023-09-01" \
+            --query "value[?name=='log-$(namePrefix)-$(environmentName)'].name" -o tsv || true)
+
+          if [ -z "${DELETED_WS}" ]; then
+            echo "    none found"
+          else
+            echo "    found: ${DELETED_WS}, inside its 14-day soft-delete window"
+            echo "    The Bicep deployment will RECOVER it rather than create a new one."
+            echo "    That is the intended outcome and needs no action: recovery requires the"
+            echo "    same name, resource group and location, and this template supplies all"
+            echo "    three. If provisioning fails on log-$(namePrefix)-$(environmentName),"
+            echo "    this is the reason - there is no purge API for a workspace, so the only"
+            echo "    options are to recover it or to wait the window out."
+          fi
+
+          # ---------------------------------------------------------------------------
           # The SQL Entra administrator has to be this pipeline's own principal, and ARM
           # wants its OBJECT ID. Recovering an object ID normally means `az ad sp show`,
           # a Microsoft Graph call this service principal has no permission to make.

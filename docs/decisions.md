@@ -1730,3 +1730,28 @@ never been true is not tested by any number of green runs. Eleven green pipeline
 nothing whatsoever about the branch the entire claim rests on, because they all took the
 `else`. The only way to find that out is to look at what the branch would have done, or to
 make it happen.
+
+### The second soft-delete: Log Analytics
+
+Raised while planning the from-scratch test, on the grounds that "it usually just works"
+was the phrase that had covered the APIM purge for eleven green runs while that step was
+broken. One unverified instance of it was enough.
+
+A deleted Log Analytics workspace is held for **14 days** with its name reserved. Same
+shape as APIM, different resolution: there is no purge API for a workspace. Recreating one
+with the same name, resource group and location **recovers** the soft-deleted instance,
+which is the outcome this deployment wants — the name and the workspace ID come back, and
+`log-${namePrefix}-${environmentName}` carries no `uniqueString` suffix so it is stable by
+construction.
+
+So the provision stage does not fix anything here; it **says** something. It lists
+`deletedWorkspaces` and, if ours is in there, states that the deployment is about to
+recover it rather than create it. The value is entirely diagnostic: a soft-deleted
+workspace nobody mentioned would make a failed recovery read as a fresh provisioning fault
+and send someone to the wrong layer — which is precisely how the APIM soft-delete presents
+itself as a naming collision.
+
+Verified against the live subscription before being written, rather than after: the
+endpoint is `.../providers/Microsoft.OperationalInsights/deletedWorkspaces` and the
+api-version is `2023-09-01`. `2021-06-01` returns `InvalidResourceType`, so the version is
+load-bearing and not decorative.
