@@ -250,7 +250,7 @@ retry does not start out holding entities the failed attempt added.
 
 **An order records no customer identity.** There is no user column. The order endpoint reads no
 caller identity from the token it just validated. This is deliberate and settled. See
-[assumptions.md](assumptions.md) §3, which also states where it is weakest.
+[assumptions.md](assumptions.md) §2, which also states where it is weakest.
 
 `OrderLines` captures the unit price at order time rather than joining back to `Pizzas`, so a
 later price change does not rewrite history.

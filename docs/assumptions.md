@@ -159,8 +159,8 @@ single-instance in `centralindia`.
 
 ### 7. The positive order path is not covered by the pipeline
 
-The smoke test's four gateway assertions are negatives, plus one positive that proves the
-gateway-to-backend hop. **No automated assertion covers a valid caller token producing a 201**,
+Three of the smoke test's four gateway assertions are negatives. The fourth is a positive that
+proves the gateway-to-backend hop. **No automated assertion covers a valid caller token producing a 201**,
 because that needs an interactive PKCE sign-in, which cannot be done from a pipeline agent without
 storing a credential.
 

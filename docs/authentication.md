@@ -310,7 +310,7 @@ authsettingsV2:
 `coupon-api` but was issued to any other application, including a *user* token from the SPA, is
 rejected, because its `appid` is not on the list.
 
-**No third app registration is needed.** Easy Auth reuses `coupon-api`, which keeps Day 0 at three
+**No third app registration is needed.** Easy Auth reuses `coupon-api`, which keeps Day 0 at five
 items. Two things make that work without any directory grant. A managed identity can obtain an
 app-only token for `coupon-api` with no app-role assignment, because client credentials returns a
 token with no `roles` claim and `allowedApplications` does not look at roles. And a user token for
@@ -334,7 +334,7 @@ reasons, and the second is the deciding one.
 `tenantId`. The client ID is needed twice: as the SQL contained-user SID, and in Easy Auth's
 `allowedApplications`. Recovering one from a principal ID means `az ad sp show`, a Microsoft Graph
 call. The pipeline's service principal has no Graph application permissions and gets
-`Authorization_RequestDenied`. Granting some would add a fourth item to the Day 0 list, which is
+`Authorization_RequestDenied`. Granting some would add a sixth item to the Day 0 list, which is
 the thing that list exists to prevent.
 
 **A system-assigned identity dies with its App Service.** Recreate the app alone and the client ID
@@ -454,7 +454,7 @@ or later still as a 500 from a deployed app.
 
 ## 8. What is proven, and what is not
 
-The pipeline's smoke test makes four gateway assertions, and every one of them is a **negative**:
+The pipeline's smoke test makes four gateway assertions. Three of the four are **negatives**:
 
 | # | Call | Asserted |
 |---|---|---|
