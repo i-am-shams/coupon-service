@@ -1,3 +1,39 @@
+## Phase A — domain model, ICouponEvaluator, BDD scenarios (2026-08-27)
+
+### CouponBasket carries only the subtotal
+
+`ICouponEvaluator.Evaluate` receives a `CouponBasket(decimal Subtotal)` rather than
+the full `Basket`. A coupon rule needs nothing but the basket value; passing the full
+basket would give the coupon project visibility into pizza IDs and prices, breaking the
+dependency boundary.
+
+### CouponEvaluator is in PizzaShop.Coupons, not PizzaShop.Infrastructure
+
+The implementation works against an injected `IEnumerable<CouponRecord>` catalogue.
+Phase B will supply that catalogue from EF Core via an adapter. Keeping the evaluator
+in the domain project means the rules are testable without any infrastructure at all.
+
+### Rounding: Math.Round once on the final discount, AwayFromZero
+
+As required by the brief: one rounding call after the full discount is computed, before
+capping at the subtotal. `MidpointRounding.AwayFromZero` matches standard retail
+rounding (€0.005 rounds up to €0.01).
+
+### Discount cap enforced in two places
+
+`CouponEvaluator.CalculateDiscount` caps the rounded discount at the subtotal.
+`PricingService.Price` also floors the total at zero via `Math.Max(0m, ...)`.
+The second guard is redundant given the first, but it is the structural invariant the
+brief requires — even if a future evaluator implementation skips the cap, the total
+cannot go negative.
+
+### Pending scenarios use @ignore, not @pending
+
+Reqnroll's `@ignore` tag generates `[Fact(Skip = ...)]` in the xUnit output, which
+registers as Skipped. The custom `@pending` tag + `ScenarioContext.Pending()` throws
+`XUnitPendingStepException`, which xUnit counts as a failure. `@ignore` is the correct
+mechanism for "this test will be implemented in a future phase".
+
 The service connection is scoped to the subscription rather than a resource group. Azure DevOps recommends the narrower scope, and in a long-lived environment that's right — but the pipeline creates its own resource group as its first action, so a group-scoped connection would require someone to create it manually first, which contradicts the no-manual-steps requirement. In a real environment I'd scope the connection to a pre-provisioned group and treat that group as part of the platform, not the workload.
 Commits are structured by phase rather than squashed, so the sequence of work is visible.
 ## Service connection
