@@ -32,8 +32,10 @@ One design rule: **the server decides the price.** The browser sends a basket. I
 ```csharp
 public interface ICouponEvaluator
 {
-    CouponEvaluation Evaluate(string code, Basket basket, DateTimeOffset asOf);
+    CouponEvaluation Evaluate(string code, CouponBasket basket, DateTimeOffset asOf);
 }
+
+public sealed record CouponBasket(decimal Subtotal);
 
 public sealed record CouponEvaluation(
     bool IsValid,
@@ -42,11 +44,13 @@ public sealed record CouponEvaluation(
     CouponRejectionReason? Reason);
 ```
 
-Two things matter here.
+Three things matter here.
 
 It **never returns just true or false.** A rejection carries a reason — `Expired`, `MinimumSpendNotMet`, `NotFound`, `RedemptionLimitReached` — which drives the message the customer sees, the log entry, and the test assertion from one place.
 
 It **takes the current time as a parameter** instead of reading the clock inside. Otherwise expiry rules cannot be tested properly.
+
+It **takes a subtotal, not a basket.** Every condition in the locked set — expiry, minimum order value, redemption limit — needs only the order's value. Passing the full basket would hand the coupon project pizza IDs and prices, and a boundary that depends on the coupon code politely not looking is not a boundary. With `CouponBasket` it genuinely cannot see them. The cost is that any item-scoped coupon — "10% off pizzas only", buy one get one — would require reopening this signature, which is a deliberate design change rather than a small edit.
 
 **Rules enforced:** a discount can never be more than the subtotal, so the total never goes below zero. One coupon per order. Rounding happens once, on the final discount.
 
@@ -169,7 +173,9 @@ Audience is the one most often left out of copied examples. Without it, any vali
 
 ### Gateway to backend
 
-The App Service accepts requests only from API Management. APIM authenticates with a system-assigned managed identity, and the App Service allows that one client and nothing else.
+The App Service accepts requests only from API Management. APIM authenticates with a user-assigned managed identity, and the App Service allows that one client and nothing else.
+
+User-assigned rather than system-assigned, for a reason that only appears when you build it. A system-assigned identity exposes no client ID to ARM — and the client ID is what both the App Service's allowed-client list and the SQL contained user are built from. Recovering one from a principal ID means a Microsoft Graph call the deployment principal has no permission to make. A user-assigned identity also outlives its App Service: recreate the app with a system-assigned identity and it returns with a new client ID, leaving a database user that exists under the right name and silently no longer authenticates.
 
 Two separate trust relationships: the caller trusts the gateway, and the backend trusts the gateway. The caller and the backend never trust each other, and the backend can't be reached directly.
 
@@ -181,13 +187,19 @@ Two separate trust relationships: the caller trusts the gateway, and the backend
 |---|---|---|
 | API Management | Consumption tier | Deploys in ~3 minutes. Other tiers take 30–45, which makes a from-scratch pipeline impractical. |
 | Backend | App Service, Linux, B1 | The free tier has a daily CPU limit that stops the app when exceeded. |
-| Database | Azure SQL, auto-pause off | A 30–60 second wake-up during review looks like a broken app. |
+| Database | Azure SQL, Basic tier | Basic has no auto-pause to switch off. The 30–60 second serverless wake-up that would look like a broken app cannot occur. |
 | Frontend | Storage account, static site | Deploys cleanly and adds no second login system. |
 | Telemetry | Application Insights + Log Analytics | Connected to both the gateway and the backend. |
 
-### No secrets anywhere
+### No stored secrets
 
-There's no password anywhere in this solution. APIM talks to the App Service using a managed identity, and the App Service talks to Azure SQL the same way. No Key Vault needed — there's nothing to store.
+**The running system holds no credential.** APIM talks to the App Service using a managed identity, and the App Service talks to Azure SQL the same way. The SQL server has Entra-only authentication, so a password does not merely go unused — one cannot be created. No Key Vault is needed, because there is nothing to store.
+
+**The pipeline is a narrower claim, and worth stating precisely rather than rounding up.** Two credentials are used at deploy time: the API Management subscription keys, and the storage account key that uploads the frontend. Both are fetched from ARM at the moment they are needed, used inside a single task, and never written to a file or published as a pipeline variable.
+
+The storage key is there because the alternative is worse. Uploading blob content is a data action that Contributor does not include, and the pipeline cannot grant itself the role that would cover it — `Microsoft.Authorization/*/Write` is in Contributor's `notActions`. Making it work would mean giving the service connection User Access Administrator: the standing power to assign itself any role, on anything. Contributor already includes `listKeys`, so the account key confers nothing the pipeline could not already obtain, where that role grant would confer a great deal.
+
+To be straight about what changed here: an earlier draft of this section said there was no password anywhere in the solution, full stop. That was broader than the truth, and the subscription keys made it loose before the storage key ever existed — §5 requires them. The claim that holds is about the running system, which was always the substance of it.
 
 The tricky part is the database, because the usual approach is blocked.
 
@@ -213,13 +225,17 @@ This detail matters because it's the opposite of the rule everywhere else in Azu
 
 To run that command, the pipeline has to be an Entra admin on the SQL Server. That's just a setting in Bicep, along with a firewall rule that lets Azure services connect.
 
-The result is a fully passwordless setup with no tenant admin needed and no manual step. It adds about twenty lines in the pipeline and one Bicep property — a fair trade for having zero secrets.
+The result is a passwordless database with no tenant admin needed and no manual step. It adds about twenty lines in the pipeline and one Bicep property — a fair trade for a database that has no credential to leak, rotate, or store.
 
 ### Frontend hosting
 
 Azure Static Web Apps would be the production choice for CDN and custom domains. I'm not using it here because its built-in login would sit alongside the login at the gateway, and having two competing sign-in systems is confusing.
 
-The storage account name is fixed, so the frontend URL is known before deployment and the redirect URI can be registered in advance. `errorDocument404Path` is set to `index.html` so a page refresh on a client-side route doesn't 404.
+The storage account name is pinned rather than generated, so the frontend URL is **stable across a teardown and rebuild** and a registered redirect URI keeps working.
+
+It is not knowable *before* the first deployment. A static-site hostname is `https://<account>.zNN.web.core.windows.net`, and the `zNN` segment is a DNS zone assigned when the account is created — `z29` for this deployment, and not predictable from the account name. So the redirect URI is registered after the first provision, and the pipeline fails the frontend stage if the deployed origin ever stops matching what was registered.
+
+`errorDocument404Path` is set to `index.html` so a page refresh on a client-side route doesn't 404.
 
 ---
 
@@ -232,7 +248,7 @@ A pipeline can't create the credential it uses to log in. Being clear about wher
 **Day 0 — set up once, by hand, and documented**
 
 1. Azure subscription and Azure DevOps service connection
-2. Two Entra ID app registrations (the API and the React app)
+2. Two Entra ID app registrations (the API and the React app). The React app's redirect URIs go on the **SPA** platform. Not `publicClient` — Entra accepts a browser origin there and then fails sign-in, because CORS on the token endpoint is enabled only for SPA-platform URIs. Not `web` — that platform expects a client secret to redeem the code, which a browser cannot hold. This item completes in two sittings: `http://localhost:5173` at the start, and the deployed static-site origin once the storage account exists, added **alongside** the localhost one rather than replacing it.
 3. A test user for review
 
 Nothing else. No database credential and no tenant-level role grant needed — see §6.
@@ -262,13 +278,16 @@ Build and test come first, so no Azure resource is created for code that doesn't
 
 **The smoke test checks the response body, not just the status code.** A status-only check can pass against a deployment that isn't serving the app at all. I've shipped that bug before — a single-page app whose fallback returned 200 for every path.
 
-**It also checks that the gateway's security policies actually fire.** Otherwise nothing tests them — a deployment could go green with `validate-jwt` misconfigured and nobody would know. Three checks:
+**It also checks that the gateway's security policies actually fire.** Otherwise nothing tests them — a deployment could go green with `validate-jwt` misconfigured and nobody would know. Six checks. Each asserts *which* component rejected the call, not only the status, because a 401 from the key check and a 401 from the token policy are indistinguishable by status alone:
 
 | Call | Expected |
 |---|---|
-| `GET /menu` with no subscription key | 401 from the gateway |
+| `GET /menu` with no subscription key | 401, body naming the missing key — so it is the key check and not something else returning 401 |
 | `GET /menu` with a key | 200, body contains a known pizza name |
-| `POST /orders` with a key but no token | 401 from the gateway |
+| `POST /orders` with a key but no token | 401, body carrying the `validate-jwt` message |
+| `POST /orders` with a key and a malformed token | 401 from the gateway |
+| `GET` the static site root | 200, serving the built application rather than a fallback |
+| the deployed JavaScript bundle | contains no development-only token claims panel |
 
 ---
 
@@ -276,7 +295,7 @@ Build and test come first, so no Azure resource is created for code that doesn't
 
 **Reqnroll, not SpecFlow.** SpecFlow reached end of life on 31 December 2024 and never supported .NET 8. Reqnroll is the maintained continuation by the original author, with the same Gherkin syntax.
 
-Scenarios run against the API through `WebApplicationFactory`, so they exercise real routing, model binding, and status codes — not just calling objects. The database is swapped for an in-memory one. **The pricing and coupon logic is never mocked** — a test that mocks the thing it's testing proves nothing.
+Scenarios run against the API through `WebApplicationFactory`, so they exercise real routing, model binding, and status codes — not just calling objects. The database is swapped for **SQLite in-memory** — SQLite specifically, not the EF Core in-memory provider. The EF provider supports neither `ExecuteUpdateAsync` nor transactions, which are exactly the two mechanisms the atomic redemption below depends on. Under it every order carrying a coupon returns a 500, and the suite still passes, because no scenario would have exercised the path. **The pricing and coupon logic is never mocked** — a test that mocks the thing it's testing proves nothing.
 
 Scenarios are written in business language. The mapping from a readable step to a rejection reason lives in the step definition, so changing the wording of a message doesn't break tests.
 
@@ -327,7 +346,7 @@ Health checks use `Microsoft.Extensions.Diagnostics.HealthChecks`. Liveness chec
 3. One coupon per order. Stacking is a pricing decision, not a technical limit.
 4. One currency, no tax or delivery fee.
 5. Orders are stored but not fulfilled. There's no payment step.
-6. The reviewer will use a pre-created test account, documented in the README.
+6. The reviewer will use a pre-created test account, documented in the README. It is a **member** of the tenant rather than a guest, so no first-sign-in consent prompt can appear in front of them.
 
 **Known limitations**
 

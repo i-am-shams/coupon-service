@@ -1,0 +1,32 @@
+<!--
+    Product-scope policy for the coupon service.
+
+    approach.md §10 records that rate limiting here is per subscription rather than per
+    user. This is the policy that makes that true.
+
+    It is `rate-limit` and not `rate-limit-by-key`, and it is at PRODUCT scope and not API
+    scope, because those are the only forms the Consumption tier supports. Per-key limits
+    need shared counter state that a gateway which scales to zero does not keep. Applying
+    the by-key form here would be rejected at save time, not at call time.
+
+    The counter is per subscription, so the frontend and the smoke test — which hold
+    different subscriptions — cannot exhaust each other's budget.
+
+    120 calls a minute is generous for a demo and a smoke run (which makes six) while still
+    being a real limit rather than a decorative one.
+-->
+<policies>
+    <inbound>
+        <base />
+        <rate-limit calls="120" renewal-period="60" />
+    </inbound>
+    <backend>
+        <base />
+    </backend>
+    <outbound>
+        <base />
+    </outbound>
+    <on-error>
+        <base />
+    </on-error>
+</policies>

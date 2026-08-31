@@ -178,6 +178,23 @@ resource product 'Microsoft.ApiManagement/service/products@2022-08-01' = {
   }
 }
 
+// approach.md §10 limitation 3: rate limiting is per subscription rather than per user.
+// This is what makes that true. `rate-limit` at product scope is the only form the
+// Consumption tier supports — `rate-limit-by-key` needs shared counter state a gateway that
+// scales to zero does not keep, and is rejected at save time rather than at call time.
+//
+// Validated against the live gateway on a throwaway product before being added here, because
+// APIM checks policy content only when it is saved: bicep build, deployment validate and
+// what-if all pass a policy the resource provider will reject.
+resource productPolicy 'Microsoft.ApiManagement/service/products/policies@2022-08-01' = {
+  parent: product
+  name: 'policy'
+  properties: {
+    format: 'rawxml'
+    value: loadTextContent('../policies/product-rate-limit.xml')
+  }
+}
+
 // One of only two explicit dependsOn in the whole template, and it is here because the
 // implicit graph genuinely misses it: this resource identifies the API by a name string,
 // not by a reference to the api resource, so nothing tells ARM the API must exist first.
