@@ -1,0 +1,328 @@
+openapi: 3.0.3
+
+# The contract as exposed by the gateway, not as routed by the backend.
+#
+# API Management is configured with path `api/v1` and a backend service URL that already
+# carries the `/api/v1` suffix, so the paths below are relative to both. A caller sees
+# https://<gateway>/api/v1/menu; the backend receives /api/v1/menu.
+#
+# This file is imported by infra/modules/apim.bicep with loadTextContent, so the API in
+# Azure and the API in the repository cannot drift: changing one without the other is
+# not possible.
+#
+# There is deliberately no `servers` block. API Management supplies the backend address
+# from the `serviceUrl` property on the API resource, which is built from the App
+# Service's hostname at deploy time. A `servers` entry here would either be a relative
+# URL the importer cannot resolve, or a hardcoded hostname that goes stale the first time
+# the resource group is recreated.
+
+info:
+  title: Coupon Service API
+  version: '1.0'
+  description: |
+    Pizza ordering with coupon support.
+
+    Every call requires an API Management subscription key in `Ocp-Apim-Subscription-Key`.
+    Placing an order additionally requires an Entra ID access token with the
+    `Orders.Write` scope. The key says which client is calling; the token says who the
+    caller is. They are not interchangeable.
+
+    No request carries a price, subtotal or total. The server resolves every price from
+    its own data on every call.
+
+security:
+  - subscriptionKey: []
+
+tags:
+  - name: Menu
+    description: The pizzas on offer and their prices.
+  - name: Coupons
+    description: Previewing a discount. Read-only.
+  - name: Orders
+    description: Placing an order.
+
+paths:
+
+  /menu:
+    get:
+      tags: [Menu]
+      operationId: getMenu
+      summary: List the pizzas on offer
+      description: |
+        Anonymous browsing. A subscription key is required, but no user token is —
+        nobody should have to sign in to look at a menu.
+      responses:
+        '200':
+          description: The menu.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MenuItem'
+              example:
+                - id: 1
+                  name: Margherita
+                  description: Tomato, mozzarella, fresh basil
+                  price: 10.00
+                - id: 2
+                  name: Pepperoni
+                  description: Tomato, mozzarella, pepperoni
+                  price: 12.00
+        '401':
+          $ref: '#/components/responses/MissingSubscriptionKey'
+
+  /coupons/validate:
+    post:
+      tags: [Coupons]
+      operationId: validateCoupon
+      summary: Preview the discount a coupon would give
+      description: |
+        A read-only preview. It consumes no redemption and writes nothing.
+
+        Returns 200 even when the coupon is rejected: the endpoint's job is to answer
+        "can I use this code?", and "no, it expired" is a valid answer. The reason is in
+        `rejectionReason`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CouponValidationRequest'
+            example:
+              couponCode: PIZZA10
+              items:
+                - pizzaId: 1
+                  quantity: 2
+                - pizzaId: 3
+                  quantity: 1
+      responses:
+        '200':
+          description: The answer, whether or not the coupon was valid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CouponValidationResponse'
+              example:
+                couponCode: PIZZA10
+                isValid: true
+                rejectionReason: null
+                subtotal: 31.50
+                discountAmount: 3.15
+                total: 28.35
+                description: 10% off your order
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/MissingSubscriptionKey'
+
+  /orders:
+    post:
+      tags: [Orders]
+      operationId: placeOrder
+      summary: Place an order
+      description: |
+        Requires a subscription key **and** an Entra ID access token carrying the
+        `Orders.Write` scope.
+
+        Returns 201 even when the coupon failed, with `couponApplied: false` and a
+        reason. The order succeeded; the discount did not. The order is always priced
+        from the server's own data — the preview is a hint, the submission is the truth,
+        and the two may legitimately disagree if a coupon expires or is exhausted in
+        between.
+      security:
+        - subscriptionKey: []
+          bearerToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderRequest'
+            example:
+              couponCode: FIVEOFF
+              items:
+                - pizzaId: 2
+                  quantity: 1
+      responses:
+        '201':
+          description: The order was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderResponse'
+              example:
+                orderId: 42
+                subtotal: 12.00
+                discountAmount: 5.00
+                total: 7.00
+                couponApplied: true
+                couponCode: FIVEOFF
+                rejectionReason: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: |
+            Missing subscription key, or a missing, expired or invalid access token.
+            Which one it was is in the response body.
+
+components:
+
+  securitySchemes:
+    subscriptionKey:
+      type: apiKey
+      name: Ocp-Apim-Subscription-Key
+      in: header
+      description: API Management subscription key. Identifies the client and the product; it is not proof of identity.
+    bearerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Entra ID access token with the Orders.Write scope, validated at the gateway.
+
+  responses:
+    MissingSubscriptionKey:
+      description: No valid subscription key was supplied. Rejected by the gateway; the backend was never called.
+    BadRequest:
+      description: The request was malformed — an unknown pizza, or a quantity below one.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+  schemas:
+
+    MenuItem:
+      type: object
+      required: [id, name, description, price]
+      properties:
+        id:
+          type: integer
+          format: int32
+        name:
+          type: string
+        description:
+          type: string
+        price:
+          type: number
+          format: double
+
+    BasketLine:
+      type: object
+      description: A basket line carries what was ordered, never what it costs.
+      required: [pizzaId, quantity]
+      properties:
+        pizzaId:
+          type: integer
+          format: int32
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+
+    CouponValidationRequest:
+      type: object
+      required: [items]
+      properties:
+        couponCode:
+          type: string
+          nullable: true
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/BasketLine'
+
+    CouponValidationResponse:
+      type: object
+      required: [isValid, subtotal, discountAmount, total]
+      properties:
+        couponCode:
+          type: string
+          nullable: true
+        isValid:
+          type: boolean
+        rejectionReason:
+          $ref: '#/components/schemas/CouponRejectionReason'
+        subtotal:
+          type: number
+          format: double
+        discountAmount:
+          type: number
+          format: double
+        total:
+          type: number
+          format: double
+          description: Never negative. A discount larger than the subtotal floors the total at zero.
+        description:
+          type: string
+          nullable: true
+
+    OrderRequest:
+      type: object
+      required: [items]
+      properties:
+        couponCode:
+          type: string
+          nullable: true
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/BasketLine'
+
+    OrderResponse:
+      type: object
+      required: [orderId, subtotal, discountAmount, total, couponApplied]
+      properties:
+        orderId:
+          type: integer
+          format: int32
+        subtotal:
+          type: number
+          format: double
+        discountAmount:
+          type: number
+          format: double
+        total:
+          type: number
+          format: double
+        couponApplied:
+          type: boolean
+        couponCode:
+          type: string
+          nullable: true
+          description: Present only when the coupon was actually redeemed.
+        rejectionReason:
+          $ref: '#/components/schemas/CouponRejectionReason'
+
+    CouponRejectionReason:
+      type: string
+      nullable: true
+      description: |
+        Why a coupon was not applied. Null when it was. A rejection is never a bare
+        boolean — this value drives the customer-facing message, the log entry and the
+        test assertion from one place.
+      enum:
+        - NotFound
+        - Expired
+        - MinimumSpendNotMet
+        - RedemptionLimitReached
+
+    ProblemDetails:
+      type: object
+      description: RFC 7807. Carries a traceId matching the correlation ID; never a stack trace.
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+        traceId:
+          type: string

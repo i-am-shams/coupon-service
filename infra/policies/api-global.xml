@@ -1,0 +1,115 @@
+<!--
+    API-scope policy for the coupon service. Applies to every operation.
+
+    Three jobs:
+
+      1. CORS for the static frontend, so the browser can call the gateway directly.
+      2. A correlation ID, stamped on the way in and returned on the way out, so one
+         request can be followed from the gateway into the application's log lines
+         (approach.md §9).
+      3. Authenticating to the backend as the gateway's managed identity, which is the
+         half of the trust relationship that makes the App Service unreachable except
+         through here (approach.md §5).
+
+    Placeholders are __NAME__ and are substituted by Bicep at deploy time. They are not
+    {{NAME}}: double braces are APIM's own named-value syntax and a policy containing an
+    unresolvable named value is rejected when it is saved, not when it is called. Rule 10.
+-->
+<policies>
+    <inbound>
+        <base />
+
+        <!--
+            CORS sits at API scope rather than operation scope on purpose. A preflight
+            OPTIONS request carries no subscription key and matches no operation; APIM
+            only answers it if the cors policy is at API scope or above.
+        -->
+        <cors allow-credentials="false">
+            <allowed-origins>
+                <origin>__FRONTEND_ORIGIN__</origin>
+                <!--
+                    Local development. Kept alongside the deployed origin rather than
+                    replaced by it — the same rule that applies to the Entra redirect
+                    URIs, and for the same reason: losing it costs a day of local work
+                    to rediscover. See docs/decisions.md.
+                -->
+                <origin>__LOCAL_DEV_ORIGIN__</origin>
+            </allowed-origins>
+            <allowed-methods preflight-result-max-age="300">
+                <method>GET</method>
+                <method>POST</method>
+                <method>OPTIONS</method>
+            </allowed-methods>
+            <allowed-headers>
+                <header>Content-Type</header>
+                <header>Authorization</header>
+                <header>Ocp-Apim-Subscription-Key</header>
+                <header>x-correlation-id</header>
+            </allowed-headers>
+            <!--
+                Without this the browser can see the header on the wire but JavaScript
+                cannot read it, so a frontend could never quote the correlation ID in a
+                bug report.
+            -->
+            <expose-headers>
+                <header>x-correlation-id</header>
+            </expose-headers>
+        </cors>
+
+        <!--
+            Keep the caller's correlation ID if they sent one, mint one from the
+            gateway's own request ID otherwise. Minting unconditionally would break a
+            caller that is already correlating across several services.
+        -->
+        <!--
+            Single-quoted attribute on purpose: the expression contains C# string
+            literals, and double quotes inside a double-quoted XML attribute are not
+            well-formed. XML permits either quoting style; APIM accepts both.
+        -->
+        <set-variable name="correlationId" value='@{
+            var incoming = context.Request.Headers.GetValueOrDefault("x-correlation-id", string.Empty);
+            return string.IsNullOrWhiteSpace(incoming) ? context.RequestId.ToString() : incoming;
+        }' />
+        <set-header name="x-correlation-id" exists-action="override">
+            <value>@((string)context.Variables["correlationId"])</value>
+        </set-header>
+    </inbound>
+
+    <backend>
+        <!--
+            This must be in <backend> and not in <inbound>.
+
+            The gateway rewrites the Authorization header with its own managed identity
+            token. Inbound sections run outermost-first — API scope before operation
+            scope — so an <authentication-managed-identity> in inbound would replace the
+            caller's token *before* the operation's validate-jwt ever read it, and from
+            phase D onwards POST /orders would validate the gateway's own token instead
+            of the customer's. It would pass, which is the worst version of that bug.
+
+            The backend section runs after every inbound section, so by the time this
+            executes the caller's token has already been validated and is no longer
+            needed.
+        -->
+        <authentication-managed-identity resource="__BACKEND_RESOURCE__" client-id="__GATEWAY_CLIENT_ID__" ignore-error="false" />
+        <base />
+    </backend>
+
+    <outbound>
+        <base />
+        <set-header name="x-correlation-id" exists-action="override">
+            <value>@((string)context.Variables["correlationId"])</value>
+        </set-header>
+    </outbound>
+
+    <on-error>
+        <base />
+        <!--
+            A failure in inbound can happen before the variable is set, so this cannot
+            assume it exists. Returning the ID on the error path is the case that matters
+            most: it is the response somebody will be asking about.
+        -->
+        <set-header name="x-correlation-id" exists-action="override">
+            <value>@(context.Variables.ContainsKey("correlationId") ? (string)context.Variables["correlationId"] : context.RequestId.ToString())</value>
+        </set-header>
+    </on-error>
+</policies>

@@ -1,5 +1,7 @@
+using Microsoft.ApplicationInsights.Extensibility;
 using Microsoft.EntityFrameworkCore;
 using PizzaShop.Api.Endpoints;
+using PizzaShop.Api.Middleware;
 using PizzaShop.Coupons;
 using PizzaShop.Infrastructure;
 using PizzaShop.Infrastructure.Adapters;
@@ -15,12 +17,26 @@ try
 {
     var builder = WebApplication.CreateBuilder(args);
 
+    // Application Insights. Registered before Serilog is configured, because the sink
+    // below resolves the TelemetryConfiguration this call sets up. The connection string
+    // arrives as the APPLICATIONINSIGHTS_CONNECTION_STRING app setting, which Bicep sets
+    // from the component it creates — it is never in a file.
+    builder.Services.AddApplicationInsightsTelemetry();
+
     // Serilog replaces the default logging pipeline. Application code uses ILogger<T>.
     builder.Host.UseSerilog((ctx, services, config) => config
         .ReadFrom.Configuration(ctx.Configuration)
         .ReadFrom.Services(services)
         .Enrich.FromLogContext()
-        .WriteTo.Console());
+        .WriteTo.Console()
+        // Traces, not events: log lines belong in the traces table where they can be
+        // queried alongside the requests and dependencies App Insights collects itself.
+        // Without this sink the gateway's telemetry arrives and the application's log
+        // lines do not, which looks like a broken instrumentation key rather than a
+        // missing sink.
+        .WriteTo.ApplicationInsights(
+            services.GetRequiredService<TelemetryConfiguration>(),
+            TelemetryConverter.Traces));
 
     // EF Core — SQL Server, migrations assembly in Infrastructure.
     var connectionString = builder.Configuration.GetConnectionString("PizzaShop")
@@ -39,9 +55,27 @@ try
     builder.Services.AddHealthChecks()
         .AddDbContextCheck<PizzaShopDbContext>("database", tags: ["ready"]);
 
-    builder.Services.AddProblemDetails();
+    // approach.md §4: a fault carries a traceId matching the correlation ID. Without
+    // this the default traceId is the Activity's own ID, which is a different value from
+    // the one in the x-correlation-id header — so the ID a caller quotes from a failed
+    // response would not be the ID in the logs.
+    builder.Services.AddProblemDetails(options =>
+    {
+        options.CustomizeProblemDetails = context =>
+        {
+            if (context.HttpContext.Items.TryGetValue(CorrelationIdMiddleware.ItemsKey, out var correlationId)
+                && correlationId is string id)
+            {
+                context.ProblemDetails.Extensions["traceId"] = id;
+            }
+        };
+    });
 
     var app = builder.Build();
+
+    // Before the exception handler, so a fault that is turned into ProblemDetails still
+    // has a correlation ID to report.
+    app.UseCorrelationId();
 
     app.UseExceptionHandler();
 

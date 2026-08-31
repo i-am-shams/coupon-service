@@ -454,3 +454,212 @@ those were in scope, the token's `oid` claim is the column to add — `oid` rath
 `preferred_username`, per the spike 3 finding on `#EXT#` guests.
 
 Recorded now rather than discovered during phase D.
+
+## Phase C — infrastructure and pipeline (2026-08-27)
+
+### User-assigned managed identities, not system-assigned
+
+Both identities are `Microsoft.ManagedIdentity/userAssignedIdentities`: one for the App
+Service (to reach SQL), one for API Management (to reach the App Service).
+
+**Why the obvious choice does not work.** A system-assigned identity exposes only
+`principalId` and `tenantId` to ARM. There is no `clientId` anywhere in the resource, and
+the client ID is needed twice — as the SQL contained-user SID, and in Easy Auth's
+`allowedApplications`, which pins the backend to the gateway. Recovering a client ID from
+a principal ID means `az ad sp show`, a Microsoft Graph call. The Azure DevOps service
+connection's principal has no Graph application permissions, so it returns
+`Authorization_RequestDenied`. Granting it some would add a fourth item to the Day 0 list
+in approach.md §7, which is the thing that list exists to prevent.
+
+**The deciding argument was durability, not convenience.** A system-assigned identity dies
+with its App Service. Recreate the app alone and the client ID changes while the name does
+not, so the SQL contained user — matched by name — survives carrying a SID that no longer
+belongs to anything. The app then fails to authenticate, and it fails in a way that reads
+as a firewall or connection-string problem. On a project whose acceptance test is "delete
+the resource group and re-run the pipeline", that is disqualifying.
+
+A third benefit fell out of it: creating both identities in their own module, before
+anything consumes them, removes what would otherwise be a circular reference — the App
+Service's auth settings need the gateway's identity, and the gateway needs the App
+Service's hostname.
+
+### `AZURE_CLIENT_ID` — a delta from what spike 1 verified
+
+Spike 1 proved this connection string, with no credential and no client ID in it:
+
+    Server=tcp:<server>.database.windows.net,1433;Initial Catalog=<db>;
+    Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;
+
+That string is unchanged in `infra/modules/appservice.bicep`. What changed is that it no
+longer works on its own.
+
+`Active Directory Default` resolves `DefaultAzureCredential`, which on App Service picks
+the **system-assigned** identity with nothing else configured — the spike's setup. With a
+user-assigned identity there is no single obvious identity to resolve, so it has to be
+named. The App Service therefore carries one extra app setting:
+
+    AZURE_CLIENT_ID = <the api identity's client ID>
+
+`DefaultAzureCredential` reads it and authenticates as that identity. It is not a
+credential — a client ID is a public identifier — so rule 7 is untouched.
+
+**Recorded because it reopens a verified result.** The end-to-end proof in spike 1 was
+obtained against a system-assigned identity. The connection string survives that change;
+the credential resolution does not, and this app setting is the whole of the difference.
+The first failure if it were missing would be a login failure from the application with a
+perfectly correct connection string, which is a bad place to start debugging.
+
+### Basic SQL: approach.md §6's "auto-pause off" is satisfied by the tier, not a property
+
+The database is `Basic` (5 DTU, 2 GB, ~$5/month), matching the cost guardrail in
+EXECUTION-PLAN §8.
+
+Auto-pause is a **serverless**-tier feature. The Basic tier has no such behaviour, so
+there is no `autoPauseDelay` in `infra/modules/sql.bicep` and none is missing. A comment
+in the template says so at the point where somebody would look.
+
+**Recorded so nobody reads §6, hunts for the property, and concludes the requirement was
+skipped.** The alternative reading of §6 — serverless with `autoPauseDelay: -1` — would
+satisfy it literally at roughly six times the cost for the same behaviour.
+
+### The pipeline purges soft-deleted API Management services before provisioning
+
+`az group delete` does not free an API Management name. The service is soft-deleted, held
+for 48 hours, and keeps its name reserved. Recreating it fails with **"Api Management
+service name is not available"**.
+
+**The failure mode this prevents.** That message reads as a naming collision — someone
+else took the name, or the `uniqueString` suffix collided — and sends you off to rename
+the resource. It is nothing of the sort: it is residue from the previous teardown, and the
+name becomes available again on its own after two days, or immediately after a purge.
+
+Without this step, the project's stated acceptance test — delete the resource group, run
+the pipeline, get a working system — is false for the next 48 hours after every teardown.
+
+The purge matches on the project's name prefix rather than the exact name, because the
+exact name comes from `uniqueString` and is not computable outside ARM.
+
+### `grant-db-access.sql` compares the SID instead of only checking the name
+
+The previous version was `IF NOT EXISTS (... WHERE name = @AppName)`. That is idempotent
+for a re-run and wrong for a rebuild.
+
+**The failure mode this prevents.** If the identity is recreated, the client ID changes
+and the name does not. The old script finds a user with the right name, does nothing, and
+reports success. The App Service then cannot authenticate, and nothing in the pipeline log
+points at the grant — that stage was green. The symptom appears one stage later as a
+failed application start, or later still as a 500 from a deployed app.
+
+The script now reads the existing user's SID, drops and recreates the user if it differs,
+and prints which of the three paths it took. Re-running is genuinely idempotent rather
+than merely non-erroring.
+
+### Phase E compares the deployed frontend origin against the registered redirect URI
+
+The provision stage prints the static website origin and a note that it must match the
+`coupon-spa` redirect URI character for character.
+
+Pinning the storage account name — which this log already records as the reason not to let
+Bicep generate one — makes the URL stable while the account exists. It does not make it
+predictable across a full teardown: the `zNN` segment of
+`https://<name>.zNN.web.core.windows.net` is a DNS zone assigned at account creation, and
+nothing guarantees a recreated account is assigned the same one.
+
+**The failure mode this prevents.** Entra does exact string matching on redirect URIs,
+with no wildcards. A mismatch does not fail the deployment, does not fail the smoke test,
+and produces no server-side error anywhere — the frontend deploys green and then sign-in
+fails in the browser with `AADSTS50011`. Comparing the two values in the pipeline turns a
+silent, browser-only failure into a stage that fails with the two strings side by side.
+
+### Easy Auth reuses the `coupon-api` registration; no third app registration
+
+The App Service validates tokens against `coupon-api` (`90a27142-…`) with
+`allowedApplications` restricted to the gateway identity's client ID. No new registration
+is created, so Day 0 stays at the three items in approach.md §7.
+
+Two things make this work without any directory grant. A managed identity can obtain an
+app-only token for `coupon-api` without an app-role assignment — client credentials
+returns a token with no `roles` claim, which is fine because Easy Auth's
+`allowedApplications` check does not look at roles. And a *user* token for the same
+audience is still rejected, because its `appid` is the SPA's, not the gateway's.
+
+`allowedAudiences` carries both `90a27142-…` and `api://90a27142-…`. Spike 3 observed the
+bare GUID for a v2 token; the `api://` form is how the resource is requested. Accepting
+both removes a class of 401 that reads as a broken policy.
+
+### `authentication-managed-identity` is in `<backend>`, not `<inbound>`
+
+`infra/policies/api-global.xml` rewrites the `Authorization` header with the gateway's own
+token in the **backend** section.
+
+**The failure mode this prevents, in phase D.** Inbound sections run outermost first: API
+scope before operation scope. An `authentication-managed-identity` in inbound at API scope
+would therefore replace the caller's token *before* the operation-scope `validate-jwt` on
+`POST /orders` ever read it — and `validate-jwt` would then validate the gateway's own
+token. It would pass. An order endpoint that accepts every request while reporting a
+successful token validation is the worst available version of that bug, and nothing in the
+smoke test would catch it.
+
+The backend section runs after every inbound section, by which point the caller's token
+has been validated and is no longer needed.
+
+### The SQL administrator's object ID comes out of the ARM access token
+
+`Microsoft.Sql/servers`'s `administrators.sid` is the **object** ID — the resource schema
+says so explicitly — which is the opposite of the contained-user rule recorded under spike
+1. The pipeline gets it by base64-decoding the payload of its own ARM access token and
+reading the `oid` claim.
+
+This needs no directory permission at all, which is the same constraint that drove the
+user-assigned identity decision. `az ad sp show` would have been the obvious way to get
+it, and it is a Graph call the pipeline principal cannot make.
+
+### `Invoke-Sqlcmd -AccessToken`, not `sqlcmd -G`
+
+`sqlcmd`'s Entra modes do not read the Azure CLI token cache on a Microsoft-hosted agent,
+and under workload identity federation there is no secret and no interactive session to
+fall back on. `infra/scripts/grant-db-access.ps1` asks `az` for a token scoped to
+`https://database.windows.net/` and hands it to `Invoke-Sqlcmd` directly.
+
+A side benefit: the `.sql` file stays a real reviewable file, because `Invoke-Sqlcmd
+-Variable` uses the same `$(Name)` substitution syntax the script was already written for.
+
+### No `healthCheckPath` on the App Service
+
+App Service platform health probes are subject to Easy Auth. Pointing one at `/health`
+would mark every instance unhealthy unless `/health` were added to
+`globalValidation.excludedPaths` — which would publish it anonymously on the internet.
+
+approach.md §4 keeps both health endpoints off the gateway; this keeps them off the public
+hostname too. Readiness remains available to anything that can reach the app with a
+gateway token.
+
+### The OpenAPI contract has no `servers` block
+
+API Management supplies the backend address from `serviceUrl` on the API resource, built
+from the App Service's hostname at deploy time. A `servers` entry would be either a
+relative URL the importer cannot resolve, or a hardcoded hostname that goes stale the
+first time the resource group is recreated.
+
+### Application Insights sink and correlation ID — approach.md §9 now has code behind it
+
+Both were promised by §9 and neither existed. They land in phase C rather than later
+because this is the phase where the infrastructure to receive them appears, and shipping a
+phase where the design document and the code disagree is worse than the extra twenty
+lines.
+
+- `Serilog.Sinks.ApplicationInsights` writes log lines to the traces table.
+  `Microsoft.ApplicationInsights.AspNetCore` is pinned to **2.22.0**: the Serilog sink
+  requires `Microsoft.ApplicationInsights < 3.0.0`, and taking the 3.x AspNetCore package
+  produces an `NU1107` version conflict.
+- `CorrelationIdMiddleware` keeps the gateway's `x-correlation-id`, pushes it onto the
+  Serilog log context, mirrors it onto `Activity.Current` as a **tag**, and echoes it in
+  the response.
+- `ProblemDetails` now reports that same value as `traceId`, so the ID a caller quotes
+  from a failed response is the ID in the logs. It previously reported the Activity's own
+  ID, which is a different string.
+
+The Activity mirroring is a tag rather than a replacement of the trace ID on purpose:
+overwriting the Activity's identifiers would break the W3C trace context that joins the
+gateway's telemetry to the application's, which is the thing §9 wanted in the first place.
+APIM's diagnostic sets `httpCorrelationProtocol: W3C` for the same reason.
