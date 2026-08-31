@@ -1,0 +1,26 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - task: AzureCLI@2
+    displayName: 'Prove the service connection works'
+    inputs:
+      azureSubscription: 'azure-lab'
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -e
+        echo "Signed in as:"
+        az account show --query "{subscription:name, id:id, tenant:tenantId}" -o table
+
+        echo "Creating a throwaway resource group:"
+        az group create -n rg-spike-connection -l centralindia -o table
+
+        echo "Deleting it:"
+        az group delete -n rg-spike-connection --yes
+        echo "Connection verified."
