@@ -42,7 +42,7 @@ var appServiceName = 'app-${namePrefix}-${environmentName}-${nameSuffix}'
 var sqlServerName = 'sql-${namePrefix}-${environmentName}-${nameSuffix}'
 var apimServiceName = 'apim-${namePrefix}-${environmentName}-${nameSuffix}'
 
-@description('Storage account holding the static frontend. Leave empty to use the deterministic name; set it explicitly to keep an existing static website URL. Pinned either way, because the URL is registered as an Entra redirect URI and Entra matches it as an exact string. A default cannot reference a var, hence the empty sentinel.')
+@description('Storage account holding the static frontend. Leave empty — as the pipeline does — for the deterministic name built from uniqueString(subscription().id, resourceGroup().name), which is reproduced identically when this resource group is deleted and recreated in the same subscription. Set it explicitly only to recover an existing static website URL that the deterministic name would no longer produce: a different subscription, or a differently named group. Either way the URL is registered as an Entra redirect URI and Entra matches it as an exact string. A default cannot reference a var, hence the empty sentinel.')
 @maxLength(24)
 param storageAccountName string = ''
 

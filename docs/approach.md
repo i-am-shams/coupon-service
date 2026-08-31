@@ -235,7 +235,7 @@ The result is a passwordless database with no tenant admin needed and no manual 
 
 Azure Static Web Apps would be the production choice for CDN and custom domains. I'm not using it here because its built-in login would sit alongside the login at the gateway, and having two competing sign-in systems is confusing.
 
-The storage account name is pinned rather than generated, so the frontend URL is **stable across a teardown and rebuild** and a registered redirect URI keeps working.
+The storage account name is deterministic rather than random — `uniqueString(subscription().id, resourceGroup().name)`, neither of which changes when the group is deleted and recreated — so the frontend URL is **stable across a teardown and rebuild** and a registered redirect URI keeps working.
 
 It is not knowable *before* the first deployment. A static-site hostname is `https://<account>.zNN.web.core.windows.net`, and the `zNN` segment is a DNS zone assigned when the account is created — `z29` for this deployment, and not predictable from the account name. So the redirect URI is registered after the first provision, and the pipeline fails the frontend stage if the deployed origin ever stops matching what was registered.
 

@@ -18,7 +18,7 @@ One resource group, `rg-coupon-service`, in `centralindia`.
 | App Service | `app-couponsvc-lab-dtjori` | Linux B1, on `plan-couponsvc-lab` |
 | Azure SQL server | `sql-couponsvc-lab-dtjori` | Entra-only authentication |
 | Azure SQL database | `sqldb-couponsvc-lab` | Basic, 5 DTU |
-| Storage account | `stcouponsvclabdtjori` | `$web` static site; **name pinned** |
+| Storage account | `stcouponsvclabdtjori` | `$web` static site; **name deterministic**, see below |
 | Managed identity | `id-couponsvc-lab-api` | App Service → SQL |
 | Managed identity | `id-couponsvc-lab-gateway` | APIM → App Service |
 | Application Insights | `appi-couponsvc-lab` | Gateway and backend |
@@ -30,10 +30,19 @@ One resource group, `rg-coupon-service`, in `centralindia`.
 - Frontend — <https://stcouponsvclabdtjori.z29.web.core.windows.net>
 - Gateway — `https://apim-couponsvc-lab-dtjori.azure-api.net`
 
-The names carry a `uniqueString` suffix and are not computable outside ARM, with one exception:
-the **storage account name is pinned** rather than generated, so the frontend URL survives a
-teardown and rebuild and a registered redirect URI keeps working. See §6 for the part of that URL
-that is still not guaranteed.
+Every name carries a `uniqueString` suffix and none is computable outside ARM. The storage
+account matters more than the others, because its name is in the frontend URL and that URL is a
+registered Entra redirect URI — so it has to survive a teardown and rebuild.
+
+It does, and the mechanism is worth stating precisely because "pinned" would be the wrong word:
+the suffix is `uniqueString(subscription().id, resourceGroup().name)`, and **neither input
+changes when the group is deleted and recreated in the same subscription**. The name is
+therefore reproduced identically rather than held. `main.bicep` has a `storageAccountName`
+parameter that would pin it literally; the pipeline does not pass it, because it has not needed
+to. Deploying to a different subscription or a differently named group *would* change the name,
+and that is what the parameter is for.
+
+See §6 for the part of that URL that is still not guaranteed even so.
 
 Roughly **$20/month** at rest. One resource group, so `az group delete -n rg-coupon-service`
 removes all of it.
@@ -45,9 +54,27 @@ removes all of it.
 A pipeline cannot create the credential it uses to log in. Being clear about where that line
 falls is better than pretending it is not there.
 
-**Three items. Nothing else.** No database credential, no tenant-level role grant, no Key Vault.
+**Five items.** No database credential, no tenant-level role grant, no Key Vault — but five,
+not three. Two of them are configuration rather than identity and were previously left implicit
+here, while §4 below listed them; a reviewer reading "three" and then meeting a fourth is
+exactly the failure this section exists to prevent.
 
-### 1. Azure subscription and an Azure DevOps service connection
+| | Item | Why a pipeline cannot do it |
+|---|---|---|
+| 1 | Azure DevOps project, this repository, and a pipeline pointed at `azure-pipelines.yml` | The pipeline cannot create itself |
+| 2 | An Azure service connection | A pipeline cannot create the credential it logs in with |
+| 3 | Two Entra ID app registrations | They live in Microsoft Graph, not ARM — and this completes in **two sittings** |
+| 4 | A reviewer test account, and tenant security defaults off | Identity governance, and a tenant-wide switch |
+| 5 | The pipeline variables in `azure-pipelines.yml` set for your subscription and tenant | They name the service connection and the app registrations from items 2 and 3 |
+
+Items 1 and 5 are unavoidable and uninteresting, which is why they were missing: nobody thinks
+of "create the pipeline" as a step. They are steps. Item 5 in particular is an **edit to a file
+in this repository** — the variables block in §3 — and it has to happen after item 3, because
+it carries those client IDs.
+
+Items 2, 3 and 4 are the ones with substance, and they are below.
+
+### Item 2 — Azure subscription and an Azure DevOps service connection
 
 Workload identity federation with OpenID Connect — **not** a service principal secret. There is
 nothing to store and nothing to rotate; Azure DevOps and Entra trust each other directly and the
@@ -63,7 +90,7 @@ than the workload.
 The connection needs **Contributor** on the subscription. It does *not* need User Access
 Administrator, and deliberately does not have it — see [authentication.md](authentication.md) §9.
 
-### 2. Two Entra ID app registrations
+### Item 3 — Two Entra ID app registrations
 
 `coupon-api` and `coupon-spa`. Both single-tenant. Details, IDs and the scope configuration are
 in [authentication.md](authentication.md) §2.
@@ -123,7 +150,7 @@ Three details in that:
 Under PowerShell, quote the URI: PowerShell parses the parentheses in a Graph URL. Or run it from
 bash.
 
-### 3. A reviewer test account
+### Item 4 — A reviewer test account
 
 A **member** of the tenant, not a guest. The tenant-wide `AllPrincipals` grant covers the
 application, but a guest's first sign-in can still surface prompts, and a member account removes
@@ -290,8 +317,9 @@ limit and it is stated there rather than glossed here.
 
 ### From an empty subscription
 
-1. Complete the three Day 0 items in §2, with `http://localhost:5173` as the only redirect URI.
-2. Set the pipeline variables in §3 for your subscription and tenant.
+1. Complete Day 0 items 1 to 4 in §2, with `http://localhost:5173` as the only redirect URI on
+   `coupon-spa` for now.
+2. Day 0 item 5: set the pipeline variables in §3 for your subscription and tenant.
 3. Run the pipeline. It will complete through stage 6 — the smoke test's frontend assertions pass
    because they do not involve Entra.
 4. Take the frontend origin printed by stage 2, add it to `coupon-spa` under the SPA platform, and

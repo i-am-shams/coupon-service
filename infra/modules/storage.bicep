@@ -1,9 +1,19 @@
 // Storage account hosting the React frontend as a static website.
 //
-// The account name is pinned by the caller rather than generated, because the static
-// website URL has to be registered as an Entra redirect URI and Entra does exact string
-// matching. See docs/decisions.md, "Redirect URIs: production must match the deployed
-// frontend exactly".
+// The account name is DETERMINISTIC rather than random, because the static website URL has
+// to be registered as an Entra redirect URI and Entra does exact string matching. See
+// docs/decisions.md, "Redirect URIs: production must match the deployed frontend exactly".
+//
+// Deterministic, not pinned. This module takes whatever name the caller passes, and
+// main.bicep composes it from uniqueString(subscription().id, resourceGroup().name) unless
+// its storageAccountName parameter is set — which the pipeline does not set. Neither input
+// to that hash changes when the resource group is deleted and recreated in the same
+// subscription, so the name comes back identical, which is the property that matters.
+//
+// It is a weaker guarantee than a literal, and the difference is worth knowing: deploy this
+// to a different subscription or a differently named resource group and the name changes.
+// main.bicep's storageAccountName parameter exists for that case — set it to recover an
+// existing URL. Nothing pins it today because nothing has needed to.
 //
 // Enabling the static website itself is NOT possible from ARM. It is a data-plane
 // setting on the blob service, so the pipeline turns it on with

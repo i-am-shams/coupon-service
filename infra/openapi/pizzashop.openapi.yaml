@@ -184,7 +184,21 @@ components:
     MissingSubscriptionKey:
       description: No valid subscription key was supplied. Rejected by the gateway; the backend was never called.
     BadRequest:
-      description: The request was malformed — an unknown pizza, or a quantity below one.
+      description: |
+        The request was malformed. Seven things are rejected this way, and none of them is
+        a server fault:
+
+          * no `items` property at all
+          * `items` present but empty
+          * a line naming a pizza that is not on the menu
+          * a line quantity below 1
+          * a line quantity above 50
+          * more than 50 lines
+          * a `couponCode` longer than 50 characters
+
+        A rejected *coupon* is not in this list. That is a 200 from
+        `/coupons/validate` and a 201 from `/orders` — the request was fine, the
+        discount did not apply.
       content:
         application/problem+json:
           schema:

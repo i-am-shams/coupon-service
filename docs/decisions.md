@@ -1648,3 +1648,38 @@ restored.
 `architecture.md` §8 also claimed "Scenarios run against the API through
 `WebApplicationFactory<Program>`" as a blanket statement. It was true of five of thirteen,
 and is now true of seven of fifteen. It says so, and says how the level is chosen.
+
+### Documentation that was true of the intent and not of the system
+
+Three of the nine findings were documents disagreeing with the thing they describe. None of
+them changes what the system does; all three would have been found by a reviewer checking a
+claim, which is the cheapest kind of damage to avoid.
+
+**"Three items. Nothing else."** `deployment.md` §2 asserted three Day 0 items and §4 of the
+same document then listed five steps to run from an empty subscription. The two missing ones
+are creating the Azure DevOps project and pipeline, and editing the variables block at the
+top of `azure-pipelines.yml` for the target subscription and tenant — that second one is an
+edit to a file in this repository, which is exactly the sort of manual step the brief's "no
+manual configuration" line is about. They were omitted because nobody counts "create the
+pipeline" as work. Both documents now say five and list them, and the README does too,
+because the README is what gets read first and it carried the same three.
+
+**"Pinned rather than generated."** Five places said the storage account name is pinned. It
+is not: `main.bicep` composes it from `uniqueString(subscription().id, resourceGroup().name)`
+and the pipeline never passes the `storageAccountName` parameter that would pin it. The
+substance survives — neither input changes when the resource group is deleted and recreated
+in the same subscription, so the name is reproduced identically and the registered redirect
+URI keeps working — but the word was wrong in a way that matters, because it describes a
+*weaker* guarantee than the one claimed. A literal name would hold anywhere; a deterministic
+one holds in this subscription and this resource-group name. That distinction is the whole
+reason the parameter exists, and `storage.bicep`'s own header comment said "pinned by the
+caller" when the caller does nothing of the kind. Corrected everywhere, including the note
+the pipeline prints at the end of the provision stage.
+
+**Two stale references.** The OpenAPI contract described `BadRequest` as "an unknown pizza,
+or a quantity below one" — it was written when those were the only two, and there are now
+seven. It also says what is *not* a 400, because a rejected coupon looking like a bad request
+is the confusion the status-code section exists to prevent. And `AGENTS.md`'s commands block
+told an agent to validate the template with `--parameters @infra/params.json`, a file that
+has never existed; the pipeline builds the argument list inline because two of the values are
+only knowable at deploy time. It now shows that.

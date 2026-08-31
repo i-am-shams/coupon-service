@@ -72,14 +72,26 @@ Gateway: `https://apim-couponsvc-lab-dtjori.azure-api.net`
 Everything below the Day 0 line is automated. Deleting the resource group and re-running the
 pipeline produces a working system.
 
-**Day 0 — by hand, once.** A pipeline cannot create the credential it uses to log in.
+**Day 0 — by hand, once. Five items.** A pipeline cannot create the credential it uses to log
+in, and it cannot create itself.
 
-1. An Azure DevOps service connection (workload identity federation, Contributor on the
+1. An Azure DevOps project, this repository, and a pipeline pointed at `azure-pipelines.yml`.
+2. An Azure DevOps service connection (workload identity federation, Contributor on the
    subscription).
-2. Two Entra app registrations — `coupon-api` and `coupon-spa`. The SPA's redirect URIs go on the
-   **SPA** platform, not `publicClient` and not `web`.
-3. A reviewer test account — a member, with Entra security defaults disabled on the tenant so no
+3. Two Entra app registrations — `coupon-api` and `coupon-spa`. The SPA's redirect URIs go on the
+   **SPA** platform, not `publicClient` and not `web`. This one completes in **two sittings**:
+   the deployed frontend origin cannot be registered until the storage account exists, so the
+   first pipeline run precedes it.
+4. A reviewer test account — a member, with Entra security defaults disabled on the tenant so no
    MFA challenge blocks sign-in.
+5. The pipeline variables at the top of `azure-pipelines.yml`, set for your subscription and
+   tenant. They name the service connection and both app registrations, so this follows 2 and 3.
+
+Items 1 and 5 are dull and easy to leave out of a list like this, which is precisely why they
+are in it: a reviewer who is told "three" and then finds a fourth has been misled about the
+thing this section exists to be honest about. Only items 2, 3 and 4 have anything interesting in
+them, and [docs/deployment.md](docs/deployment.md) §2 has all of it — including the two `az`
+commands for the redirect URIs that look right and are not.
 
 **Day 1 — the pipeline.** Push to `master`, or run `azure-pipelines.yml` manually.
 

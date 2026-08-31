@@ -131,7 +131,11 @@ cd web && npm install && npm run dev && npm run build
 
 # infrastructure
 az bicep build --file infra/main.bicep
-az deployment group validate -g <rg> -f infra/main.bicep --parameters @infra/params.json
+
+# Parameters are passed inline, not from a file. There is no infra/params.json - the
+# pipeline builds this argument list in the Provision stage, and two of the values
+# (deployingPrincipalObjectId, sqlAdminLogin) are only knowable at deploy time.
+az deployment group validate -g <rg> -f infra/main.bicep --parameters     apiClientId=<coupon-api client id>     deployingPrincipalObjectId=<oid of the principal running this>     sqlAdminLogin=<display name for the SQL Entra admin>     apimPublisherEmail=<address>
 ```
 
 ---

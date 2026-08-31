@@ -280,7 +280,7 @@ stages:
           echo ""
           echo "Phase E note: the frontend origin above must be registered as a redirect URI on"
           echo "the coupon-spa app registration, character for character. Entra does exact string"
-          echo "matching. The storage account name is pinned so this URL is stable, but the DNS"
+          echo "matching. The storage account name is deterministic so this URL is stable, but the DNS"
           echo "zone segment is assigned at account creation — if the account was ever recreated,"
           echo "compare this value against the registration before trusting it."
 

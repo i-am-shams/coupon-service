@@ -466,10 +466,14 @@ reason lives in the step definition, so changing the wording of a message does n
 | Frontend | Storage account **static website** | Deploys cleanly and adds no second login system. Static Web Apps' built-in auth would sit alongside the gateway's, and two competing sign-in systems is confusing. |
 | Telemetry | App Insights + Log Analytics | Connected to both the gateway and the backend. |
 
-The storage account name is **pinned rather than generated**, so the frontend URL stays stable
-across a teardown and rebuild and a registered redirect URI keeps working. It is not knowable
-*before* the first deployment, because the `zNN` segment of
-`https://<account>.zNN.web.core.windows.net` is a DNS zone assigned at account creation.
+The storage account name is **deterministic rather than random**, so the frontend URL stays
+stable across a teardown and rebuild and a registered redirect URI keeps working. It is composed
+from `uniqueString(subscription().id, resourceGroup().name)`, and neither of those changes when
+the group is deleted and recreated in the same subscription — so the name is reproduced, not
+held. (`main.bicep` takes a `storageAccountName` parameter that would pin it literally; nothing
+passes one.) It is not knowable *before* the first deployment either way, because the `zNN`
+segment of `https://<account>.zNN.web.core.windows.net` is a DNS zone assigned at account
+creation.
 `errorDocument404Path` is `index.html`, so refreshing on a client-side route does not 404.
 
 Both managed identities are **user-assigned, not system-assigned**. That is an authentication
