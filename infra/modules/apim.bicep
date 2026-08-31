@@ -24,6 +24,9 @@ param apimPublisherName string
 @description('Name of the subscription whose key the smoke test uses.')
 param apimSubscriptionName string
 
+@description('Name of the subscription whose key the React frontend uses.')
+param frontendSubscriptionName string
+
 @description('Resource ID of the user-assigned identity the gateway authenticates to the backend with.')
 param gatewayIdentityResourceId string
 
@@ -200,6 +203,27 @@ resource smokeTestSubscription 'Microsoft.ApiManagement/service/subscriptions@20
   }
 }
 
+// A second subscription, for the frontend, separate from the smoke test's.
+//
+// The key this generates is compiled into a public JavaScript bundle and is therefore
+// readable by anyone who opens developer tools. That is understood and accepted: an APIM
+// subscription key is a client identifier and a rate-limit handle, not a credential, and
+// the only mutating endpoint is protected by something that is not the key — the Entra
+// token validate-jwt checks on POST /orders. See docs/decisions.md.
+//
+// Separate from the smoke-test subscription so the two are independently revocable:
+// rotating a leaked frontend key must not blind the pipeline's own verification.
+resource frontendSubscription 'Microsoft.ApiManagement/service/subscriptions@2022-08-01' = {
+  parent: apimService
+  name: frontendSubscriptionName
+  properties: {
+    displayName: 'React frontend'
+    scope: product.id
+    state: 'active'
+    allowTracing: false
+  }
+}
+
 // The logger takes an instrumentation key or connection string as a credential, so it
 // goes in as a secret named value rather than inline. This is a legitimate use of APIM's
 // {{ }} syntax — a real named value reference, not a deploy-time placeholder.
@@ -279,6 +303,9 @@ output apimGatewayUrl string = apimService.properties.gatewayUrl
 
 @description('Name of the smoke-test subscription. Its key is read with listSecrets, not emitted here.')
 output apimSubscriptionName string = smokeTestSubscription.name
+
+@description('Name of the frontend subscription. Its key is read with listSecrets at build time, not emitted here.')
+output frontendSubscriptionName string = frontendSubscription.name
 
 @description('Name of the imported API, for the phase D operation-level validate-jwt policy.')
 output apiName string = apiName

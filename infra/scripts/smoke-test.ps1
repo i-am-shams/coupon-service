@@ -30,6 +30,10 @@ param(
     # A value that can only appear if the backend read it out of Azure SQL.
     [string] $ExpectedPizzaName = 'Margherita',
 
+    # The static website origin, no trailing slash. Optional so the script still runs
+    # against a deployment without a frontend.
+    [string] $FrontendOrigin = '',
+
     [int] $GatewayTimeoutSeconds = 120,
 
     # 420s, from a measured first start rather than a guess. Build 4's App Service log:
@@ -244,4 +248,57 @@ if ($badToken.StatusCode -ne 401) {
 Write-Host "  PASS  gateway rejects an order with a malformed access token (401)"
 Write-Host ''
 
-Write-Host 'Smoke test: 4 assertions passed.'
+# --- 5. The static website serves the application ------------------------------------
+#
+# Content-asserted, not status-asserted. A storage static site answers every path with
+# its 404 document, and that document is index.html here so a client-side route survives
+# a refresh — which means a 200 proves nothing on its own. approach.md §7 records having
+# shipped exactly that bug: a single-page app whose fallback returned 200 for every path.
+#
+# So this checks for markers only the built bundle carries.
+
+if ([string]::IsNullOrWhiteSpace($FrontendOrigin)) {
+    Write-Host '5. Frontend — skipped, no origin supplied'
+    Write-Host ''
+    Write-Host 'Smoke test: 4 assertions passed, 1 skipped.'
+    return
+}
+
+Write-Host '5. GET the static website root'
+
+$frontend = Wait-For `
+    -Description 'static website serves the application shell (200)' `
+    -TimeoutSeconds $GatewayTimeoutSeconds `
+    -Probe { Invoke-Probe -Uri $FrontendOrigin } `
+    -IsSatisfied { param($r) $r.StatusCode -eq 200 -and $r.Body -match '<div id="root">' }
+
+if ($frontend.Body -notmatch '<title>Pizza Shop</title>') {
+    throw "The static site responded but does not look like the app: $($frontend.Body.Substring(0, [Math]::Min(300, $frontend.Body.Length)))"
+}
+if ($frontend.Body -notmatch '/assets/index-') {
+    throw 'The static site served index.html without a built asset reference. The upload may be incomplete.'
+}
+Write-Host '        title and hashed bundle reference both present, so this is the built app'
+Write-Host ''
+
+# The claims panel is stripped at build time and the pipeline greps the artifact for it.
+# This is the same check against what is actually being served, which is the thing that
+# would embarrass anyone.
+Write-Host '6. The development-only token claims panel is not deployed'
+
+$bundleMatch = [regex]::Match($frontend.Body, '/assets/(index-[A-Za-z0-9_-]+\.js)')
+if (-not $bundleMatch.Success) {
+    throw 'Could not find the bundle reference in index.html.'
+}
+$bundleUrl = "$($FrontendOrigin.TrimEnd('/'))/assets/$($bundleMatch.Groups[1].Value)"
+$bundle = Invoke-Probe -Uri $bundleUrl
+if ($bundle.StatusCode -ne 200) {
+    throw "Could not fetch the deployed bundle at $bundleUrl (HTTP $($bundle.StatusCode))."
+}
+if ($bundle.Body -match 'PIZZASHOP_DEV_ONLY_TOKEN_CLAIMS_PANEL') {
+    throw 'The deployed bundle contains the development-only token claims panel. It renders decoded access token claims and must never be served.'
+}
+Write-Host "  PASS  deployed bundle carries no token claims panel ($([int]($bundle.Body.Length / 1024)) kB checked)"
+Write-Host ''
+
+Write-Host 'Smoke test: 6 assertions passed.'

@@ -42,6 +42,21 @@ variables:
   # docs/decisions.md, "Spike 3 — app registrations and the PKCE flow".
   apiClientId: '90a27142-cffb-4879-873a-bc0a99112ce7'
 
+  # The coupon-spa registration, created on Day 0. Public identifier, like apiClientId.
+  spaClientId: '04a724e0-6bd9-4285-ab7f-b00d2ce30e2c'
+
+  # The origin registered as a redirect URI on coupon-spa, by hand, as a Day 0 item.
+  #
+  # The pipeline cannot read the registration back — that is a Microsoft Graph call its
+  # principal has no permission to make, the same wall as `az ad sp show`. So this
+  # variable IS the record of what was registered, and the frontend stage fails if the
+  # deployed origin stops matching it. That catches drift in the zNN DNS segment, which
+  # is assigned at account creation and is not guaranteed across a delete-and-recreate.
+  #
+  # A green run means "deployment still produces the origin someone registered". It does
+  # NOT mean "Entra is correct" — nothing in the pipeline can check that.
+  expectedFrontendOrigin: 'https://stcouponsvclabdtjori.z29.web.core.windows.net'
+
   # Used by API Management for service notifications only.
   apimPublisherEmail: 'publisher@example.com'
   apimPublisherName: 'Coupon Service'
@@ -121,6 +136,13 @@ stages:
       artifact: infra
       displayName: 'Publish infrastructure sources'
 
+    # Same reasoning as infra/: every stage builds the revision this run tested, rather
+    # than re-checking out. The frontend cannot be built here — the gateway URL is
+    # compiled into the JavaScript and is not known until provisioning has run.
+    - publish: 'web'
+      artifact: web
+      displayName: 'Publish frontend sources'
+
 # =====================================================================================
 # 2. Provision
 # =====================================================================================
@@ -192,10 +214,10 @@ stages:
           # ---------------------------------------------------------------------------
           echo "==> Deriving the pipeline principal's object ID from the ARM token"
           ARM_TOKEN=$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)
-          SQL_ADMIN_OBJECT_ID=$(printf '%s' "${ARM_TOKEN}" | cut -d. -f2 | python3 -c \
+          DEPLOYING_PRINCIPAL_OBJECT_ID=$(printf '%s' "${ARM_TOKEN}" | cut -d. -f2 | python3 -c \
             'import sys,base64,json; p=sys.stdin.read().strip(); p+="="*(-len(p)%4); print(json.loads(base64.urlsafe_b64decode(p))["oid"])')
           unset ARM_TOKEN
-          echo "    object ID: ${SQL_ADMIN_OBJECT_ID}"
+          echo "    object ID: ${DEPLOYING_PRINCIPAL_OBJECT_ID}"
 
           echo "==> Bicep deployment"
           az deployment group create \
@@ -207,7 +229,7 @@ stages:
                 namePrefix="$(namePrefix)" \
                 environmentName="$(environmentName)" \
                 apiClientId="$(apiClientId)" \
-                sqlAdminObjectId="${SQL_ADMIN_OBJECT_ID}" \
+                deployingPrincipalObjectId="${DEPLOYING_PRINCIPAL_OBJECT_ID}" \
                 sqlAdminLogin="$(serviceConnection)-pipeline" \
                 apimPublisherEmail="$(apimPublisherEmail)" \
                 apimPublisherName="$(apimPublisherName)" \
@@ -243,6 +265,7 @@ stages:
           echo "##vso[task.setvariable variable=apimSubscriptionName;isOutput=true]${APIM_SUBSCRIPTION_NAME}"
           echo "##vso[task.setvariable variable=storageAccountName;isOutput=true]${STORAGE_ACCOUNT_NAME}"
           echo "##vso[task.setvariable variable=frontendOrigin;isOutput=true]${FRONTEND_ORIGIN}"
+          echo "##vso[task.setvariable variable=frontendSubscriptionName;isOutput=true]$(get frontendSubscriptionName)"
 
           echo ""
           echo "Gateway  : ${APIM_GATEWAY_URL}"
@@ -344,15 +367,143 @@ stages:
     # polls, which is the only reliable way to know the new build is serving.
 
 # =====================================================================================
-# 5. Build and deploy frontend — phase E
+# 5. Build and deploy frontend
 # =====================================================================================
 #
-# Not present yet. When it lands it goes here, between the backend deploy and the smoke
-# test, because the gateway URL is compiled into the JavaScript and the smoke test should
-# run against the finished system. It also owns turning the static website on:
-#   az storage blob service-properties update --account-name <name> --static-website \
-#     --index-document index.html --404-document index.html
-# which is a data-plane call and therefore cannot live in Bicep.
+# After the backend deploy because the gateway URL is compiled into the JavaScript, and
+# before the smoke test because the smoke test should run against the finished system.
+- stage: DeployFrontend
+  displayName: '5 · Build and deploy frontend'
+  # Provision listed directly: stageDependencies only reaches stages this one depends on.
+  dependsOn:
+    - Provision
+    - DeployBackend
+  condition: succeeded()
+  variables:
+    apimGatewayUrl: $[ stageDependencies.Provision.Provision.outputs['deploy.apimGatewayUrl'] ]
+    apimServiceName: $[ stageDependencies.Provision.Provision.outputs['deploy.apimServiceName'] ]
+    frontendSubscriptionName: $[ stageDependencies.Provision.Provision.outputs['deploy.frontendSubscriptionName'] ]
+    storageAccountName: $[ stageDependencies.Provision.Provision.outputs['deploy.storageAccountName'] ]
+    frontendOrigin: $[ stageDependencies.Provision.Provision.outputs['deploy.frontendOrigin'] ]
+  jobs:
+  - job: DeployFrontend
+    displayName: 'Build with injected configuration, then upload'
+    steps:
+
+    - download: current
+      artifact: web
+
+    - task: NodeTool@0
+      displayName: 'Install Node 20'
+      inputs:
+        versionSpec: '20.x'
+
+    # One task, because the APIM subscription key is fetched, used and discarded inside
+    # it. It never becomes a pipeline variable and never lands in a file. Rule 7.
+    - task: AzureCLI@2
+      displayName: 'Build and upload the frontend'
+      inputs:
+        azureSubscription: '$(serviceConnection)'
+        scriptType: bash
+        scriptLocation: inlineScript
+        workingDirectory: '$(Pipeline.Workspace)/web'
+        inlineScript: |
+          set -euo pipefail
+
+          # -------------------------------------------------------------------------
+          # The redirect URI guard.
+          #
+          # Entra matches redirect URIs as exact strings with no wildcards. A mismatch
+          # fails nowhere on the server: the frontend deploys green, the smoke test
+          # passes, and sign-in then fails in the browser with AADSTS50011. This turns
+          # that into a stage failure with both strings side by side.
+          #
+          # It compares the deployed origin against expectedFrontendOrigin, which is a
+          # record of what a human registered. It cannot read the registration itself —
+          # that is a Microsoft Graph call this principal has no permission to make.
+          # -------------------------------------------------------------------------
+          echo "==> Redirect URI guard"
+          echo "    deployed  : $(frontendOrigin)"
+          echo "    registered: $(expectedFrontendOrigin)"
+          if [ "$(frontendOrigin)" != "$(expectedFrontendOrigin)" ]; then
+            echo "##vso[task.logissue type=error]Deployed frontend origin does not match the origin registered on coupon-spa. Sign-in would fail with AADSTS50011. Either register the deployed origin as a redirect URI and update the expectedFrontendOrigin pipeline variable, or pin storageAccountName to recover the previous URL."
+            exit 1
+          fi
+          echo "    match"
+
+          echo "==> Reading the frontend subscription key"
+          SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          FRONTEND_KEY=$(az rest --method post \
+            --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/$(resourceGroupName)/providers/Microsoft.ApiManagement/service/$(apimServiceName)/subscriptions/$(frontendSubscriptionName)/listSecrets?api-version=2022-08-01" \
+            --query primaryKey -o tsv)
+          if [ -z "${FRONTEND_KEY}" ]; then
+            echo "##vso[task.logissue type=error]Could not read the frontend APIM subscription key."
+            exit 1
+          fi
+
+          echo "==> npm ci"
+          npm ci --no-audit --no-fund
+
+          echo "==> npm run build"
+          # Only VITE_-prefixed variables reach the bundle. The build fails on a missing
+          # one rather than shipping `undefined`, which would surface as a sign-in that
+          # silently does nothing.
+          VITE_GATEWAY_URL="$(apimGatewayUrl)" \
+          VITE_SPA_CLIENT_ID="$(spaClientId)" \
+          VITE_TENANT_ID="$(tenantId)" \
+          VITE_API_SCOPE="api://$(apiClientId)/Orders.Write" \
+          VITE_SUBSCRIPTION_KEY="${FRONTEND_KEY}" \
+            npm run build
+
+          # -------------------------------------------------------------------------
+          # The development-only token claims panel must not ship. It is stripped by
+          # import.meta.env.DEV, which Vite replaces with `false` in a production build,
+          # leaving dead code that Rollup removes along with the module.
+          #
+          # That is the mechanism. This is the proof. A claims dump on a public site is
+          # exactly the thing a reviewer screenshots, so "it should be stripped" is not
+          # good enough on its own.
+          # -------------------------------------------------------------------------
+          echo "==> Checking the dev-only claims panel was stripped"
+          if grep -rq "PIZZASHOP_DEV_ONLY_TOKEN_CLAIMS_PANEL" dist/; then
+            echo "##vso[task.logissue type=error]The development-only token claims panel is present in the production bundle. It renders decoded access token claims and must never be deployed."
+            exit 1
+          fi
+          echo "    absent"
+
+          # -------------------------------------------------------------------------
+          # Static website is a data-plane setting with no ARM property, so it cannot
+          # live in Bicep. Verified before this was written: this call works over OAuth
+          # with the pipeline's existing Contributor, because it maps to the
+          # management-plane action Microsoft.Storage/storageAccounts/blobServices/write.
+          #
+          # The 404 document is index.html so a refresh on a client-side route does not
+          # 404. approach.md section 6.
+          # -------------------------------------------------------------------------
+          echo "==> Enabling the static website"
+          az storage blob service-properties update \
+            --account-name "$(storageAccountName)" \
+            --auth-mode login \
+            --static-website true \
+            --index-document index.html \
+            --404-document index.html \
+            --output none
+
+          # Uploading blob CONTENT is a data action, which Contributor does NOT include —
+          # verified: it returns "You do not have the required permissions". Hence the
+          # Storage Blob Data Contributor assignment in infra/modules/storage.bicep, and
+          # hence no account key anywhere in this pipeline.
+          echo "==> Uploading the bundle"
+          az storage blob upload-batch \
+            --account-name "$(storageAccountName)" \
+            --auth-mode login \
+            --destination '$web' \
+            --source dist \
+            --overwrite \
+            --output none
+
+          echo ""
+          echo "Frontend: $(frontendOrigin)"
 
 # =====================================================================================
 # 6. Smoke test
@@ -363,10 +514,11 @@ stages:
   # outputs, so it must depend on it directly.
   dependsOn:
     - Provision
-    - DeployBackend
+    - DeployFrontend
   condition: succeeded()
   variables:
     apimServiceName: $[ stageDependencies.Provision.Provision.outputs['deploy.apimServiceName'] ]
+    frontendOrigin: $[ stageDependencies.Provision.Provision.outputs['deploy.frontendOrigin'] ]
     apimGatewayUrl: $[ stageDependencies.Provision.Provision.outputs['deploy.apimGatewayUrl'] ]
     apimSubscriptionName: $[ stageDependencies.Provision.Provision.outputs['deploy.apimSubscriptionName'] ]
   jobs:
@@ -401,4 +553,5 @@ stages:
 
           & "$(Pipeline.Workspace)/infra/scripts/smoke-test.ps1" `
               -GatewayUrl "$(apimGatewayUrl)" `
-              -SubscriptionKey $key
+              -SubscriptionKey $key `
+              -FrontendOrigin "$(frontendOrigin)"

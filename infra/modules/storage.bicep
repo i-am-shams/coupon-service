@@ -11,6 +11,17 @@
 // in phase E, alongside the upload. A deploymentScript could do it here, but it would
 // spin up a container instance on every provision to set one flag.
 //
+// The two data-plane calls need different permissions, verified before this was written:
+//
+//   service-properties update  works over OAuth with the pipeline's existing Contributor,
+//                              because it maps to the management-plane action
+//                              Microsoft.Storage/storageAccounts/blobServices/write.
+//   blob upload-batch          does NOT. Contributor gets "You do not have the required
+//                              permissions needed to perform this operation", because
+//                              writing blob content is a data action.
+//
+// Hence the role assignment below, and no account key anywhere.
+//
 // primaryEndpoints.web is populated regardless, so the origin this module outputs is
 // available to the CORS policy on the very first deployment.
 
@@ -21,6 +32,9 @@ param location string
 @minLength(3)
 @maxLength(24)
 param storageAccountName string
+
+@description('Object ID of the principal that runs the pipeline. Granted Storage Blob Data Contributor so the frontend upload can use OAuth instead of an account key.')
+param deployingPrincipalObjectId string
 
 @description('Tags applied to the account.')
 param tags object = {}
@@ -46,6 +60,26 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
       bypass: 'AzureServices'
       defaultAction: 'Allow'
     }
+  }
+}
+
+// Storage Blob Data Contributor. Scoped to this account, not the resource group: the
+// pipeline needs to write $web here and nothing else.
+//
+// The GUID is the built-in role's well-known definition ID. A deterministic name means
+// re-running the pipeline updates the same assignment rather than failing on a conflict.
+var storageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+
+resource uploadRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(storageAccount.id, deployingPrincipalObjectId, storageBlobDataContributorRoleId)
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRoleId)
+    principalId: deployingPrincipalObjectId
+    // Without this, a role assignment for a principal ARM cannot yet resolve fails with
+    // "Principal does not exist in the directory". The pipeline's principal does exist,
+    // but stating the type skips the lookup and the associated replication race.
+    principalType: 'ServicePrincipal'
   }
 }
 

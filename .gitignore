@@ -491,3 +491,9 @@ spike/
 
 # Reqnroll regenerates these from the .feature files on every build.
 *.feature.cs
+
+# Frontend local environment (never committed)
+web/.env.local
+web/dist/
+web/node_modules/
+web/tsconfig.tsbuildinfo
