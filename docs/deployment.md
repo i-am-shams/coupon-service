@@ -129,10 +129,31 @@ A **member** of the tenant, not a guest. The tenant-wide `AllPrincipals` grant c
 application, but a guest's first sign-in can still surface prompts, and a member account removes
 that variable at no cost. Guest identities also carry an `idp` claim and no `upn`.
 
-Sign in with it once before handing it over, to clear any MFA registration prompt. A reviewer
-meeting a "set up your authenticator" screen is a reviewer who does not get to the order.
+**Disable Entra security defaults on the tenant**, and treat this as part of the same Day 0 item
+rather than an afterthought. Entra admin centre → Overview → Properties → *Manage security
+defaults* → Disabled.
 
-Credentials go in [../README.md](../README.md).
+Security defaults are **on by default**, so a tenant rebuilt from scratch re-enables them and the
+reviewer meets a wall the README says is not there. This is the one Day 0 item whose absence
+fails nowhere on the server: the pipeline goes green, the smoke test passes, and the failure is a
+person unable to sign in.
+
+Signing in once to clear the registration prompt is *not* sufficient on its own, and that is the
+trap. Registration and challenge are different things: clearing the registration screen still
+leaves MFA enforced, and a reviewer signing in from an unfamiliar device, network and country is
+exactly the risk profile that triggers a challenge — for which the second factor is on your
+phone, not theirs. A username and password would not be enough no matter how thoroughly the
+account was registered.
+
+Conditional Access would scope the exemption to this one account instead of the whole tenant, and
+is the right answer anywhere real. It needs an Entra ID P1 licence; this tenant has no licensed
+SKUs, so the tenant-wide switch is the only lever. See [assumptions.md](assumptions.md) §1.6.
+
+After disabling it, sign in once in a private window at the frontend URL and confirm you go
+straight from password to the application.
+
+Credentials go in [../README.md](../README.md), and the account should be deleted once the review
+is finished.
 
 ---
 

@@ -27,8 +27,20 @@ last section says what would be done next and in what order.
 
 6. **The reviewer uses a pre-created test account**, documented in [../README.md](../README.md).
    It is a **member** of the tenant rather than a guest, so no first-sign-in consent prompt can
-   appear in front of them, and it has been signed into once so that no MFA registration screen
-   can either.
+   appear in front of them, and Entra **security defaults are disabled** on this tenant so that no
+   MFA registration or challenge can either.
+
+   Both halves of that matter, and the second is a property of the *tenant* rather than of the
+   account — so it does not survive a rebuild. Security defaults are on by default; a tenant
+   recreated from scratch would enforce MFA again and the reviewer would meet a wall this
+   documentation says is not there. It is recorded as a Day 0 item in
+   [deployment.md](deployment.md) §2 for that reason.
+
+   Disabling it tenant-wide is the only lever available here: Conditional Access, which would
+   scope the exemption to this one account, needs an Entra ID P1 licence and this tenant has no
+   licensed SKUs. The trade is acceptable because the tenant is disposable and holds one lab
+   application, no production identity and no real data. In an environment with any of those, the
+   answer is a Conditional Access exclusion and not this.
 
 7. **The coupon set is locked at two types and three conditions.** Percentage and fixed amount;
    expiry, minimum order value, total redemption limit. This is a scope boundary, and anything

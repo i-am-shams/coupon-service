@@ -16,12 +16,15 @@ Sign-in is only needed to place an order. Browsing the menu and checking a coupo
 **Test account**
 
 ```
-username:  <PENDING — reviewer test account>
-password:  <PENDING>
+username:  reviewer@example.onmicrosoft.com
+password:  REDACTED-PASSWORD
 ```
 
-> The account is a member of the tenant and has been signed in to once, so there is no consent
-> screen and no MFA registration prompt.
+> A disposable account created for this review. It is a **member** of the tenant rather than a
+> guest, so no first-sign-in consent prompt appears, and Entra **security defaults are disabled**
+> on this lab tenant, so no MFA registration or challenge screen appears either — you should go
+> straight from password to the order. It has no role, no Azure access, and nothing attached to it
+> but the ability to obtain an `Orders.Write` token.
 
 **Coupons to try**
 
@@ -75,7 +78,8 @@ pipeline produces a working system.
    subscription).
 2. Two Entra app registrations — `coupon-api` and `coupon-spa`. The SPA's redirect URIs go on the
    **SPA** platform, not `publicClient` and not `web`.
-3. A reviewer test account — a member, signed into once.
+3. A reviewer test account — a member, with Entra security defaults disabled on the tenant so no
+   MFA challenge blocks sign-in.
 
 **Day 1 — the pipeline.** Push to `master`, or run `azure-pipelines.yml` manually.
 
@@ -119,6 +123,12 @@ fails if it ever reaches `dist/`.
 identity; the App Service reaches Azure SQL as one. The SQL server has Entra-only authentication,
 so a password does not merely go unused — one cannot be created. No Key Vault, because there is
 nothing to store.
+
+The reviewer password at the top of this file is the one apparent exception, and it is not one.
+It is a credential *for* a human reviewing the system, not a credential the system uses: nothing
+in the codebase, the pipeline or any Azure resource reads it, and deleting the account leaves the
+system running unchanged. It is written down here deliberately, because the alternative is a
+reviewer who cannot get in. It should be deleted once this review is finished.
 
 The pipeline uses two credentials at deploy time, both fetched from ARM at the moment they are
 needed and never stored. The precise claim, and why the storage account key is a *smaller* grant
