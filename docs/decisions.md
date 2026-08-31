@@ -638,6 +638,35 @@ entry at all.
 bare application (client) ID. Easy Auth's `allowedAudiences` carries both forms, so the
 token validates either way; this simply stays on the documented path.
 
+### The measured cold start is 212 seconds, not 33
+
+The smoke test's backend budget was 180 seconds, taken from the spike's ~33 second
+measurement with headroom. Build 4 failed it with a flat 404 across 28 attempts — no
+warming trend, which initially reads like a routing fault rather than a timing one. The
+system was fine: a manual call a minute later returned 200 and the full seeded menu.
+
+The App Service console log gives the real breakdown for a first start after deployment:
+
+    13:56:47  container start
+    13:56:55  Updating certificates in /etc/ssl/certs...
+    13:58:45  4 added, 0 removed; done.              <- 110s on CA certificates alone
+    13:58:58  Running the command: dotnet "PizzaShop.Api.dll"
+    14:00:19  Now listening on: http://[::]:8080     <- 81s of EF migrations, seed and JIT
+
+Two things the spike could not have shown. The platform spends nearly two minutes
+rehashing CA certificates before .NET starts at all, and this application creates its
+schema and seeds it against a Basic (5 DTU) database on first boot, where the spike app
+opened one connection and read a row.
+
+The budget is now 420 seconds. A generous budget costs nothing on a healthy deploy — the
+poll exits on first success — and only changes how long a genuinely broken one takes to
+fail. The smoke test now prints elapsed seconds on success as well as failure, so the real
+number is recorded on every run rather than rediscovered.
+
+**The reasoning in EXECUTION-PLAN §2 was right and its number was wrong.** Polling rather
+than calling once is what made this diagnosable at all; had the stage made a single call it
+would have failed identically and told us nothing about whether the app was coming up.
+
 ### `stageDependencies` only reaches stages the current stage directly depends on
 
 Build 3's deploy stage failed in seventeen seconds with `Error: Input required: appName`.

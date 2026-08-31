@@ -31,7 +31,22 @@ param(
     [string] $ExpectedPizzaName = 'Margherita',
 
     [int] $GatewayTimeoutSeconds = 120,
-    [int] $BackendTimeoutSeconds = 180,
+
+    # 420s, from a measured first start rather than a guess. Build 4's App Service log:
+    #
+    #   13:56:47  container start
+    #   13:56:55  Updating certificates in /etc/ssl/certs...
+    #   13:58:45  done                              <- 110s on CA certificates alone
+    #   13:58:58  Running the command: dotnet "PizzaShop.Api.dll"
+    #   14:00:19  Now listening on: http://[::]:8080 <- 81s of EF migrations, seed and JIT
+    #
+    # 212 seconds total. The ~33s in docs/decisions.md was a spike app with no migrations;
+    # this one creates its schema and seeds it against a Basic database on first boot.
+    #
+    # A generous budget costs nothing when the deploy is healthy, because the loop exits on
+    # the first success. It only changes how long a genuinely broken deploy takes to fail.
+    [int] $BackendTimeoutSeconds = 420,
+
     [int] $PollIntervalSeconds = 5
 )
 
@@ -91,7 +106,8 @@ function Wait-For {
         [scriptblock] $IsSatisfied # takes the probe result, returns bool
     )
 
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $started = Get-Date
+    $deadline = $started.AddSeconds($TimeoutSeconds)
     $attempt = 0
     $last = $null
 
@@ -100,7 +116,11 @@ function Wait-For {
         $last = & $Probe
 
         if (& $IsSatisfied $last) {
-            Write-Host "  PASS  $Description (attempt $attempt)"
+            # The elapsed figure is printed on success as well as failure: it is the only
+            # place the real cold-start time is recorded, and it is what the timeout above
+            # should be set from.
+            $elapsed = [int]((Get-Date) - $started).TotalSeconds
+            Write-Host "  PASS  $Description (attempt $attempt, ${elapsed}s)"
             return $last
         }
 
