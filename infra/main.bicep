@@ -167,7 +167,10 @@ module apim 'modules/apim.bicep' = {
     gatewayIdentityResourceId: identity.outputs.gatewayIdentityResourceId
     gatewayIdentityClientId: identity.outputs.gatewayIdentityClientId
     backendUrl: 'https://${appService.outputs.appServiceDefaultHostName}/api/v1'
-    backendResource: 'api://${apiClientId}'
+    // The bare application (client) ID, which is the form the authentication-managed-identity
+    // documentation uses for a caller's own Entra application. The App Service accepts both
+    // this and the api:// URI as audiences, so the token validates either way.
+    backendResource: apiClientId
     frontendOrigin: storage.outputs.staticWebsiteOrigin
     appInsightsResourceId: monitoring.outputs.appInsightsResourceId
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString

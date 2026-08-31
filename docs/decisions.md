@@ -587,21 +587,56 @@ audience is still rejected, because its `appid` is the SPA's, not the gateway's.
 bare GUID for a v2 token; the `api://` form is how the resource is requested. Accepting
 both removes a class of 401 that reads as a broken policy.
 
-### `authentication-managed-identity` is in `<backend>`, not `<inbound>`
+### The caller's token is stashed before the gateway overwrites it
 
-`infra/policies/api-global.xml` rewrites the `Authorization` header with the gateway's own
-token in the **backend** section.
+**This entry replaces an earlier one that was wrong, and the wrong version is worth
+stating because the reasoning behind it still holds.**
 
-**The failure mode this prevents, in phase D.** Inbound sections run outermost first: API
-scope before operation scope. An `authentication-managed-identity` in inbound at API scope
-would therefore replace the caller's token *before* the operation-scope `validate-jwt` on
-`POST /orders` ever read it — and `validate-jwt` would then validate the gateway's own
-token. It would pass. An order endpoint that accepts every request while reporting a
-successful token validation is the worst available version of that bug, and nothing in the
-smoke test would catch it.
+The original design put `authentication-managed-identity` in the policy's `<backend>`
+section. The reasoning: it rewrites the `Authorization` header with the gateway's own
+token, and inbound sections run outermost-first — API scope before operation scope — so
+running it in inbound would replace the caller's token *before* the operation-scope
+`validate-jwt` that phase D puts on `POST /orders` ever read it. `validate-jwt` would then
+validate the gateway's own token. It would pass. An order endpoint that accepts every
+request while reporting successful token validation is the worst available version of that
+bug, and no smoke test would catch it.
 
-The backend section runs after every inbound section, by which point the caller's token
-has been validated and is no longer needed.
+That analysis is correct. The remedy was not. Build 2 failed in the provision stage with:
+
+    ValidationError, target 'backend':
+    Error in element 'backend' on line 78, column 6:
+    backend section allows only one policy to be specified
+
+Two separate things were wrong, and the documentation states both plainly:
+
+- `authentication-managed-identity`'s **policy sections are `inbound` only**. It cannot go
+  in `backend` at all.
+- The `backend` section accepts exactly one policy, so nothing can sit alongside `<base />`
+  there regardless.
+
+**The actual fix.** The API-scope inbound policy captures the caller's bearer token into a
+`callerToken` variable *before* `authentication-managed-identity` runs, stripping the
+`Bearer ` prefix. Phase D's operation policy reads it with `validate-jwt`'s `token-value`
+attribute instead of `header-name` — a documented alternative, and the docs are explicit
+that the value must not include the `Bearer ` prefix.
+
+`authentication-managed-identity` is now the last statement in inbound at API scope.
+
+An empty `callerToken` for a caller that sent no token is correct and deliberate:
+`validate-jwt` fails an empty token value with the configured 401, which is exactly the
+third smoke assertion.
+
+**What this cost, for the record:** one seven-minute provision stage. What it did not cost
+is phase D discovering a `validate-jwt` that passes everything — which is what the original
+ordering analysis was protecting against, and which is still the reason this file has an
+entry at all.
+
+### The gateway requests its backend token for the bare application ID
+
+`authentication-managed-identity`'s `resource` is `90a27142-…` rather than
+`api://90a27142-…`. The documented example for a caller's own Entra application uses the
+bare application (client) ID. Easy Auth's `allowedAudiences` carries both forms, so the
+token validates either way; this simply stays on the documented path.
 
 ### The SQL administrator's object ID comes out of the ARM access token
 

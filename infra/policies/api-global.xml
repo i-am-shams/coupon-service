@@ -60,8 +60,7 @@
             Keep the caller's correlation ID if they sent one, mint one from the
             gateway's own request ID otherwise. Minting unconditionally would break a
             caller that is already correlating across several services.
-        -->
-        <!--
+
             Single-quoted attribute on purpose: the expression contains C# string
             literals, and double quotes inside a double-quoted XML attribute are not
             well-formed. XML permits either quoting style; APIM accepts both.
@@ -73,24 +72,56 @@
         <set-header name="x-correlation-id" exists-action="override">
             <value>@((string)context.Variables["correlationId"])</value>
         </set-header>
+
+        <!--
+            Stash the caller's own bearer token before the next policy overwrites it.
+
+            This exists because of an ordering constraint that is easy to get wrong and
+            expensive when you do. `authentication-managed-identity` replaces the
+            Authorization header with the gateway's own token, and it can only run in
+            inbound. Inbound sections run outermost-first — API scope before operation
+            scope — so it necessarily runs BEFORE the operation-scope validate-jwt that
+            phase D puts on POST /orders.
+
+            If validate-jwt then read the Authorization header, it would be validating
+            the gateway's own token rather than the customer's. It would pass. An order
+            endpoint that accepts every request while reporting successful token
+            validation is the worst available version of that bug, and no smoke test
+            would catch it.
+
+            So the caller's token is captured here and phase D's policy reads it with
+            validate-jwt's `token-value` attribute instead of `header-name`. The Bearer
+            prefix is stripped because token-value must not include it.
+
+            An empty value is correct and deliberate for a caller that sent no token:
+            validate-jwt fails it with the configured 401.
+        -->
+        <set-variable name="callerToken" value='@{
+            var auth = context.Request.Headers.GetValueOrDefault("Authorization", string.Empty);
+            return auth.StartsWith("Bearer ", System.StringComparison.OrdinalIgnoreCase)
+                ? auth.Substring(7).Trim()
+                : string.Empty;
+        }' />
+
+        <!--
+            Authenticate to the backend. Sets the Authorization header to a token for
+            coupon-api obtained as the gateway's user-assigned identity — which is the
+            identity named in the App Service's Easy Auth allowedApplications, and the
+            only one it accepts.
+
+            client-id is required because the identity is user-assigned: without it the
+            policy asks for a system-assigned identity that does not exist.
+
+            This must be the last thing in inbound at this scope.
+        -->
+        <authentication-managed-identity resource="__BACKEND_RESOURCE__" client-id="__GATEWAY_CLIENT_ID__" ignore-error="false" />
     </inbound>
 
     <backend>
         <!--
-            This must be in <backend> and not in <inbound>.
-
-            The gateway rewrites the Authorization header with its own managed identity
-            token. Inbound sections run outermost-first — API scope before operation
-            scope — so an <authentication-managed-identity> in inbound would replace the
-            caller's token *before* the operation's validate-jwt ever read it, and from
-            phase D onwards POST /orders would validate the gateway's own token instead
-            of the customer's. It would pass, which is the worst version of that bug.
-
-            The backend section runs after every inbound section, so by the time this
-            executes the caller's token has already been validated and is no longer
-            needed.
+            Left as the inherited default forwarding. The backend section accepts exactly
+            one policy, so nothing can be added alongside <base />.
         -->
-        <authentication-managed-identity resource="__BACKEND_RESOURCE__" client-id="__GATEWAY_CLIENT_ID__" ignore-error="false" />
         <base />
     </backend>
 

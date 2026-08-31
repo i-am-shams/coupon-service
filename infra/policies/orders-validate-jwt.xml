@@ -12,8 +12,20 @@
 <policies>
     <inbound>
         <base />
+        <!--
+            token-value, not header-name.
+
+            By the time this operation-scope policy runs, the API-scope policy has already
+            replaced the Authorization header with the gateway's own managed identity
+            token — it has to, because authentication-managed-identity is inbound-only and
+            inbound runs outermost-first. Validating the header here would validate the
+            gateway's token instead of the customer's, and it would PASS.
+
+            api-global.xml captures the caller's token into the callerToken variable
+            before that overwrite. See docs/decisions.md, phase C.
+        -->
         <validate-jwt
-            header-name="Authorization"
+            token-value="@((string)context.Variables.GetValueOrDefault&lt;string&gt;(&quot;callerToken&quot;, &quot;&quot;))"
             failed-validation-httpcode="401"
             failed-validation-error-message="Unauthorized. A valid access token with the Orders.Write scope is required to place an order.">
             <openid-config url="https://login.microsoftonline.com/__TENANT_ID__/v2.0/.well-known/openid-configuration" />
