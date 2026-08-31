@@ -43,8 +43,19 @@ try
         ?? "Server=(localdb)\\mssqllocaldb;Database=PizzaShop;Trusted_Connection=True;";
 
     builder.Services.AddDbContext<PizzaShopDbContext>(options =>
-        options.UseSqlServer(connectionString,
-            sql => sql.MigrationsAssembly(typeof(PizzaShopDbContext).Assembly.FullName)));
+        options.UseSqlServer(connectionString, sql =>
+        {
+            sql.MigrationsAssembly(typeof(PizzaShopDbContext).Assembly.FullName);
+
+            // Azure SQL drops connections. That is expected behaviour, not a fault, and
+            // without a retry strategy a single transient failure becomes a 500 for the
+            // customer. Observed on the first real deployment — see docs/decisions.md.
+            //
+            // This makes CreateExecutionStrategy() return a retrying strategy, which then
+            // REFUSES user-initiated transactions. OrderEndpoints wraps its transaction
+            // accordingly; a new one anywhere else must do the same.
+            sql.EnableRetryOnFailure();
+        }));
 
     // Domain services.
     builder.Services.AddScoped<ICouponRepository, CouponRepository>();
@@ -93,7 +104,15 @@ try
         await PizzaShopDbSeeder.SeedAsync(db);
     }
 
-    app.UseHttpsRedirection();
+    // Development only. Behind API Management the app is reached over the platform's own
+    // HTTPS listener and there is no HTTPS port for the middleware to redirect to, so it
+    // no-ops and logs "Failed to determine the https port for redirect" on every boot.
+    // httpsOnly on the App Service enforces the actual guarantee. A warning that fires on
+    // every healthy start teaches people to ignore start-up warnings.
+    if (app.Environment.IsDevelopment())
+    {
+        app.UseHttpsRedirection();
+    }
 
     app.MapMenuEndpoints();
     app.MapCouponEndpoints();

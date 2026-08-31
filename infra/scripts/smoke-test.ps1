@@ -188,19 +188,60 @@ if (-not ($menu -is [array]) -or $menu.Count -lt 1) {
 Write-Host "        $($menu.Count) items returned, read from Azure SQL through the managed identity"
 Write-Host ''
 
-# --- 3. POST /orders with a key but no token -> 401 (PENDING until phase D) -----------
+# --- 3. POST /orders with a key but no token -> 401 from validate-jwt ------------------
+#
+# A real assertion as of phase D. Two things have to be true for this to pass, and they
+# involve two different tokens:
+#
+#   the CALLER's token is what validate-jwt inspects, and
+#   the GATEWAY's own managed identity token is still what reaches the backend.
+#
+# Assertion 2 above covers the second: /menu only returns 200 because the gateway's token
+# was accepted by the App Service's Easy Auth, and /menu runs the same API-scope policy.
 
 Write-Host '3. POST /api/v1/orders with a subscription key but no access token'
 
 $orderBody = '{"couponCode":null,"items":[{"pizzaId":1,"quantity":1}]}'
-$noToken = Invoke-Probe -Uri $ordersUrl -Method 'POST' `
-    -Headers @{ 'Ocp-Apim-Subscription-Key' = $SubscriptionKey } `
-    -Body $orderBody
 
-Write-Host "  PENDING  observed HTTP $($noToken.StatusCode); expected 401 once phase D applies validate-jwt"
-Write-Host '           Not asserted. infra/policies/orders-validate-jwt.xml exists but is not yet attached to the'
-Write-Host '           placeOrder operation, so this endpoint is currently reachable with a key alone. A green run'
-Write-Host '           of this stage does NOT mean the token policy has been verified.'
+$noToken = Wait-For `
+    -Description 'gateway rejects an order with no access token (401)' `
+    -TimeoutSeconds $GatewayTimeoutSeconds `
+    -Probe {
+        Invoke-Probe -Uri $ordersUrl -Method 'POST' `
+            -Headers @{ 'Ocp-Apim-Subscription-Key' = $SubscriptionKey } `
+            -Body $orderBody
+    } `
+    -IsSatisfied { param($r) $r.StatusCode -eq 401 }
+
+# Asserting on the policy's own message, not just the status. A 401 here could come from
+# the subscription-key check or from the backend; only validate-jwt produces this string.
+# CLAUDE.md's table turns on exactly that distinction.
+if ($noToken.Body -notmatch 'Orders\.Write') {
+    throw "Expected the validate-jwt failure message naming Orders.Write; got: $($noToken.Body)"
+}
+Write-Host "        body carries the validate-jwt message, so this is the token policy and not the key check"
 Write-Host ''
 
-Write-Host 'Smoke test: 2 assertions passed, 1 pending (phase D).'
+# --- 4. POST /orders with a key and a malformed token -> 401 --------------------------
+#
+# Distinguishes "the policy is reading the caller's token" from "the policy is reading
+# whatever happens to be in the Authorization header". By the time the operation policy
+# runs, the header holds the gateway's own token — so if the policy read the header, the
+# value under test here would never be seen at all.
+
+Write-Host '4. POST /api/v1/orders with a subscription key and a malformed access token'
+
+$badToken = Invoke-Probe -Uri $ordersUrl -Method 'POST' `
+    -Headers @{
+        'Ocp-Apim-Subscription-Key' = $SubscriptionKey
+        'Authorization'             = 'Bearer not-a-real-token'
+    } `
+    -Body $orderBody
+
+if ($badToken.StatusCode -ne 401) {
+    throw "Expected 401 for a malformed access token; got HTTP $($badToken.StatusCode): $($badToken.Body)"
+}
+Write-Host "  PASS  gateway rejects an order with a malformed access token (401)"
+Write-Host ''
+
+Write-Host 'Smoke test: 4 assertions passed.'

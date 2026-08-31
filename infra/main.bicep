@@ -171,6 +171,8 @@ module apim 'modules/apim.bicep' = {
     // documentation uses for a caller's own Entra application. The App Service accepts both
     // this and the api:// URI as audiences, so the token validates either way.
     backendResource: apiClientId
+    tenantId: tenantId
+    apiClientId: apiClientId
     frontendOrigin: storage.outputs.staticWebsiteOrigin
     appInsightsResourceId: monitoring.outputs.appInsightsResourceId
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString

@@ -752,3 +752,127 @@ The Activity mirroring is a tag rather than a replacement of the trace ID on pur
 overwriting the Activity's identifiers would break the W3C trace context that joins the
 gateway's telemetry to the application's, which is the thing §9 wanted in the first place.
 APIM's diagnostic sets `httpCorrelationProtocol: W3C` for the same reason.
+
+## Phase D — token validation on the order endpoint (2026-08-27)
+
+### `EnableRetryOnFailure`, and why it could not go in alone
+
+Build 5's smoke test recorded an HTTP 500 on its first attempt. Application Insights has
+the cause:
+
+    System.Net.Sockets.SocketException at PizzaShop.Api.Endpoints.MenuEndpoints.GetMenu
+    A connection was successfully established with the server, but then an error occurred
+    during the login process. (provider: TCP Provider, error: 35 - An internal exception
+    was caught)
+
+This is not a bug in the application and not a misconfiguration. Azure SQL drops
+connections; a transient failure during the login handshake is expected behaviour of the
+platform. What was wrong is that `AddDbContext` had no retry strategy, so one such fault
+became a 500 for the customer. Turning an expected transient into a customer-facing error
+is a defect, not a tolerance.
+
+`sql.EnableRetryOnFailure()` is now set on the connection.
+
+**It could not be added on its own.** Enabling retries makes
+`Database.CreateExecutionStrategy()` return `SqlServerRetryingExecutionStrategy`, and that
+strategy *refuses* a user-initiated transaction:
+
+    The configured execution strategy 'SqlServerRetryingExecutionStrategy' does not
+    support user-initiated transactions.
+
+`OrderEndpoints.PlaceOrder` opens exactly such a transaction — it has to, because rule 4's
+`ExecuteUpdateAsync` redemption commits on its own and the order write must not be able to
+diverge from it. So every order carrying a coupon would have thrown, and the message reads
+as an EF configuration fault rather than as the documented consequence of enabling retries.
+
+The transaction is now opened inside `strategy.ExecuteAsync(...)`. Two details in that
+block matter:
+
+- **The coupon evaluation moved inside it.** A retry re-runs the whole block against a
+  transaction that was rolled back, so a redemption decision taken on an earlier attempt
+  must not survive into the next one — otherwise a retried order could be priced as though
+  it still held a redemption it no longer has.
+- **`ChangeTracker.Clear()` runs first.** A retry begins with a change tracker still
+  holding the entities the failed attempt added. Clearing it is what makes the block
+  genuinely repeatable rather than merely re-entered.
+
+The BDD suite still passes unchanged. SQLite returns the default non-retrying strategy, so
+`ExecuteAsync` runs the block once and the scenarios exercise the same code path.
+
+### `UseHttpsRedirection` is Development-only
+
+Every boot logged `Failed to determine the https port for redirect`. Behind API Management
+the app is reached over the platform's own HTTPS listener and there is no HTTPS port for
+the middleware to redirect to, so it no-ops; `httpsOnly` on the App Service is what
+actually enforces the guarantee.
+
+Removed from the production path rather than left to warn. A warning that fires on every
+healthy start teaches people to ignore start-up warnings, which is worse than the
+milliseconds of middleware it was costing.
+
+### `validate-jwt` is attached to the operation, not the API
+
+`infra/policies/orders-validate-jwt.xml` is applied to the `placeOrder` operation via
+`Microsoft.ApiManagement/service/apis/operations/policies`. The operation itself is created
+by the OpenAPI import, so it is referenced as `existing`; Bicep still emits the ordering
+through the parent chain, and the linter flags an explicit `dependsOn` here as
+unnecessary.
+
+Scoping it to the operation rather than the API is what approach.md §5 asks for, and it is
+also what the design requires: anonymous browsing of the menu and previewing a coupon need
+a subscription key and nothing more. Only placing an order needs to know who is asking.
+
+Every value in the policy is one spike 3 observed on a decoded token — bare client-ID
+audience, v2 issuer with no trailing slash, `scp` containing `Orders.Write`, no `roles`
+block. Placeholders are `__TENANT_ID__` and `__API_CLIENT_ID__`, substituted by Bicep.
+
+### The two tokens, and which parts of them the smoke test can prove
+
+A request to `POST /orders` involves two different tokens and both have to be right:
+
+| Token | Obtained by | Validated by | Carries |
+|---|---|---|---|
+| Caller's | The React app, PKCE | `validate-jwt` at the operation | `scp = Orders.Write` |
+| Gateway's | APIM's user-assigned identity | App Service Easy Auth | no `scp`; app-only |
+
+They are kept apart by the `callerToken` variable: the API-scope policy captures the
+caller's bearer token before `authentication-managed-identity` overwrites the header, and
+the operation policy reads it with `token-value`.
+
+`backendResource` and `apiClientId` are separate Bicep parameters that hold the same GUID,
+deliberately. One is what the gateway asks Entra for; the other is the audience a caller
+token must carry. Collapsing them would hide that they answer different questions.
+
+**What the smoke test proves.** That the gateway's token still reaches the backend —
+assertion 2, because `/menu` returns 200 only if Easy Auth accepted it, and `/menu` runs
+the same API-scope policy. That a request with no token is rejected by `validate-jwt`
+specifically — assertion 3 asserts on the policy's own message naming `Orders.Write`,
+which neither the subscription-key check nor the backend can produce.
+
+**What it does not prove, and this is the honest limit.** No automated assertion here
+covers the positive case: a *valid* caller token producing a 201. That needs a real user
+token, which needs an interactive PKCE sign-in, which cannot be done from a pipeline agent
+without storing a credential. Until phase E puts MSAL in front of this endpoint, the
+positive path is confirmed by a manual browser sign-in and not by the pipeline.
+
+Worth stating plainly because the negative assertions look more complete than they are: if
+the policy were reading the Authorization header instead of `callerToken`, it would be
+validating the gateway's own app-only token, which has no `scp` claim — so it would *also*
+return 401, and every assertion here would still pass while the endpoint was permanently
+broken for every real user.
+
+### Flagged for the approach.md revision pass
+
+Not edited — approach.md is the approved design document and the revision list is being
+collected for a single deliberate pass. Running list:
+
+1. §2's interface listing should show `CouponBasket`, not `Basket`.
+2. §8 should say "SQLite in-memory" rather than "an in-memory provider", with the reason.
+3. §10 assumption 6 should say the reviewer account is a **member**, not a guest.
+4. §6's "auto-pause off" is satisfied by the Basic tier having none — worth a clause so
+   nobody hunts for a property.
+5. §7's smoke-test table should carry the measured cold start (212s first boot, 38s warm)
+   rather than leaving the budget implicit.
+6. §5 says the caller and the backend never trust each other. True, and now worth one
+   sentence on *how*: the caller's token is captured before the gateway replaces it, so
+   the two tokens are validated by two different parties against two different rules.

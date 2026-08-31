@@ -33,8 +33,14 @@ param gatewayIdentityClientId string
 @description('Backend base URL, already carrying the /api/v1 suffix.')
 param backendUrl string
 
-@description('Resource the gateway requests a backend token for — the coupon-api application ID URI.')
+@description('Resource the gateway requests a backend token for. Same GUID as apiClientId, and deliberately a separate parameter: this is what the GATEWAY asks Entra for, while apiClientId is the audience a CALLER token must carry. Two different tokens that happen to name the same application.')
 param backendResource string
+
+@description('Entra tenant that issues caller tokens accepted by POST /orders.')
+param tenantId string
+
+@description('Application (client) ID of coupon-api — the audience a caller token must carry. Observed as the bare GUID for a v2 token in docs/decisions.md, spike 3.')
+param apiClientId string
 
 @description('Static website origin, no trailing slash, allowed by the CORS policy.')
 param frontendOrigin string
@@ -59,6 +65,9 @@ var apiName = 'coupon-service-api'
 var productName = 'coupon-service'
 var loggerName = 'appinsights'
 var appInsightsNamedValueName = 'appinsights-connection-string'
+
+// operationId from the OpenAPI document. Confirmed live in APIM after the phase C import.
+var placeOrderOperationId = 'placeOrder'
 
 // Deploy-time substitution into the policy document. __NAME__ rather than {{NAME}}:
 // double braces are APIM's own named-value syntax and would be resolved — or rejected —
@@ -121,6 +130,33 @@ resource apiPolicy 'Microsoft.ApiManagement/service/apis/policies@2022-08-01' = 
   properties: {
     format: 'rawxml'
     value: apiPolicyXml
+  }
+}
+
+var ordersPolicyXml = replace(
+  replace(loadTextContent('../policies/orders-validate-jwt.xml'), '__TENANT_ID__', tenantId),
+  '__API_CLIENT_ID__', apiClientId)
+
+// approach.md §5: validate-jwt is scoped to the order operation, not to the whole API.
+// Anonymous browsing of the menu and previewing a coupon need a subscription key and
+// nothing more; only placing an order needs to know who is asking.
+//
+// The operation itself is created by the OpenAPI import inside the api resource above,
+// not declared here, so it is referenced as existing.
+resource placeOrderOperation 'Microsoft.ApiManagement/service/apis/operations@2022-08-01' existing = {
+  parent: api
+  name: placeOrderOperationId
+}
+
+// No explicit dependsOn: the parent chain reaches the real `api` resource through the
+// existing operation reference, and Bicep emits that ordering itself. The linter confirms
+// it — adding one here is flagged as unnecessary.
+resource ordersPolicy 'Microsoft.ApiManagement/service/apis/operations/policies@2022-08-01' = {
+  parent: placeOrderOperation
+  name: 'policy'
+  properties: {
+    format: 'rawxml'
+    value: ordersPolicyXml
   }
 }
 

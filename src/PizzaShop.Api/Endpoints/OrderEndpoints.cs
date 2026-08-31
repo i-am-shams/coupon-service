@@ -46,66 +46,94 @@ public static class OrderEndpoints
 
         var asOf = DateTimeOffset.UtcNow;
         var pricingService = new PricingService(evaluator);
-        var pricing = await pricingService.PriceAsync(basket, request.CouponCode, asOf);
 
-        var couponApplied = false;
-        var rejectionReason = pricing.RejectionReason;
+        // Retries are enabled on the connection (Program.cs), which means
+        // CreateExecutionStrategy returns a retrying strategy — and a retrying strategy
+        // refuses a user-initiated transaction unless the transaction is opened inside
+        // its ExecuteAsync. Without this wrapper every order carrying a coupon throws
+        // "The configured execution strategy ... does not support user-initiated
+        // transactions", which reads as an EF configuration fault rather than as the
+        // documented consequence of turning retries on.
+        //
+        // Everything the transaction depends on is computed INSIDE the block. A retry
+        // re-runs the whole thing against a transaction that was rolled back, so a
+        // redemption decision taken on a previous attempt must not survive into the next
+        // one — otherwise a retried order could be priced as though it held a redemption
+        // it no longer has.
+        var strategy = db.Database.CreateExecutionStrategy();
 
-        // The redemption and the order are one operation. ExecuteUpdateAsync commits
-        // immediately on its own, so without this transaction a failure in the order
-        // write would leave a coupon consumed against an order that does not exist.
-        await using var transaction = await db.Database.BeginTransactionAsync();
-
-        if (pricing.CouponApplied && !string.IsNullOrWhiteSpace(request.CouponCode))
+        var outcome = await strategy.ExecuteAsync(async () =>
         {
-            // Rule 4: atomic redemption — single UPDATE, no read before write.
-            couponApplied = await couponRepository.TryRedeemAsync(request.CouponCode);
+            // A retry starts from a change tracker still holding the entities the failed
+            // attempt added. Clearing it is what makes the block genuinely repeatable.
+            db.ChangeTracker.Clear();
 
-            if (!couponApplied)
+            var pricing = await pricingService.PriceAsync(basket, request.CouponCode, asOf);
+            var couponApplied = false;
+            var rejectionReason = pricing.RejectionReason;
+
+            // The redemption and the order are one operation. ExecuteUpdateAsync commits
+            // immediately on its own, so without this transaction a failure in the order
+            // write would leave a coupon consumed against an order that does not exist.
+            await using var transaction = await db.Database.BeginTransactionAsync();
+
+            if (pricing.CouponApplied && !string.IsNullOrWhiteSpace(request.CouponCode))
             {
-                // Coupon was exhausted between the evaluation and the redemption attempt.
-                // Re-price without the coupon.
-                logger.LogWarning(
-                    "Coupon {CouponCode} exhausted between evaluation and redemption; order repriced without it",
-                    request.CouponCode);
-                pricing = await pricingService.PriceAsync(basket, null, asOf);
-                rejectionReason = CouponRejectionReason.RedemptionLimitReached;
+                // Rule 4: atomic redemption — single UPDATE, no read before write.
+                couponApplied = await couponRepository.TryRedeemAsync(request.CouponCode);
+
+                if (!couponApplied)
+                {
+                    // Coupon was exhausted between the evaluation and the redemption attempt.
+                    // Re-price without the coupon.
+                    logger.LogWarning(
+                        "Coupon {CouponCode} exhausted between evaluation and redemption; order repriced without it",
+                        request.CouponCode);
+                    pricing = await pricingService.PriceAsync(basket, null, asOf);
+                    rejectionReason = CouponRejectionReason.RedemptionLimitReached;
+                }
             }
-        }
 
-        var order = new OrderEntity
-        {
-            CreatedAt      = asOf,
-            Subtotal       = pricing.Subtotal,
-            DiscountAmount = pricing.DiscountAmount,
-            Total          = pricing.Total,
-            CouponCode     = request.CouponCode,
-            CouponApplied  = couponApplied,
-            Lines          = basket.Items.Select(i => new OrderLineEntity
+            var order = new OrderEntity
             {
-                PizzaId   = i.PizzaId,
-                Quantity  = i.Quantity,
-                UnitPrice = i.UnitPrice,
-            }).ToList(),
-        };
+                CreatedAt      = asOf,
+                Subtotal       = pricing.Subtotal,
+                DiscountAmount = pricing.DiscountAmount,
+                Total          = pricing.Total,
+                CouponCode     = request.CouponCode,
+                CouponApplied  = couponApplied,
+                Lines          = basket.Items.Select(i => new OrderLineEntity
+                {
+                    PizzaId   = i.PizzaId,
+                    Quantity  = i.Quantity,
+                    UnitPrice = i.UnitPrice,
+                }).ToList(),
+            };
 
-        db.Orders.Add(order);
-        await db.SaveChangesAsync();
-
-        if (couponApplied)
-        {
-            // The audit trail the Coupons table's UsageCount cannot give: which order
-            // consumed which redemption, and when. Written inside the same transaction.
-            db.CouponRedemptions.Add(new CouponRedemptionEntity
-            {
-                OrderId    = order.Id,
-                CouponCode = request.CouponCode!,
-                RedeemedAt = asOf,
-            });
+            db.Orders.Add(order);
             await db.SaveChangesAsync();
-        }
 
-        await transaction.CommitAsync();
+            if (couponApplied)
+            {
+                // The audit trail the Coupons table's UsageCount cannot give: which order
+                // consumed which redemption, and when. Written inside the same transaction.
+                db.CouponRedemptions.Add(new CouponRedemptionEntity
+                {
+                    OrderId    = order.Id,
+                    CouponCode = request.CouponCode!,
+                    RedeemedAt = asOf,
+                });
+                await db.SaveChangesAsync();
+            }
+
+            await transaction.CommitAsync();
+
+            return (Order: order, CouponApplied: couponApplied, RejectionReason: rejectionReason);
+        });
+
+        var order = outcome.Order;
+        var couponApplied = outcome.CouponApplied;
+        var rejectionReason = outcome.RejectionReason;
 
         // Rule 9: named properties, never interpolation.
         logger.LogInformation(
