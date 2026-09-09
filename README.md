@@ -3,7 +3,7 @@
 A pizza ordering service with coupon support. .NET 8 API behind Azure API Management, React
 frontend, Azure SQL, deployed end to end from an Azure DevOps pipeline using Bicep.
 
-**Technical assignment for Bangladesh Software Solution · Khalid Shams**
+**Technical assignment for an interview process · Khalid Shams**
 
 ---
 
