@@ -24,9 +24,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Provisioning is not safe to interrupt: a cancelled run can leave a half-created
-# resource group, and APIM in particular takes ~40 minutes to create and cannot be
-# resumed. So queue, never cancel.
+# Provisioning is not safe to interrupt. A cancelled run leaves a partially-created
+# resource group, and cancelling between the APIM create and the end of the deployment is
+# the worst case: a half-provisioned API Management service still reserves its name for 48
+# hours once deleted, so the cleanup is the purge step below rather than a re-run. The
+# whole Bicep deployment from empty measured 6m49s (docs/decisions.md, phase G), so there
+# is little to gain by cancelling and a soft-delete window to lose. Queue, never cancel.
 concurrency:
   group: coupon-service-${{ github.ref }}
   cancel-in-progress: false
