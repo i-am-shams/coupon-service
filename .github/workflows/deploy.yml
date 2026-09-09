@@ -149,9 +149,12 @@ jobs:
       # which is the nearest equivalent to PublishTestResults@2 in the Azure DevOps
       # pipeline. It runs on failure too — a failed run is exactly when the per-scenario
       # breakdown is worth having.
+      # The hashFiles guard, not a bare success() || failure(). If the BUILD fails, no .trx
+      # is ever written — this step would then fail too, and so would the upload below,
+      # putting three red steps on the summary for one problem and burying the cause.
       - name: Publish scenario results
         uses: dorny/test-reporter@v1
-        if: success() || failure()
+        if: (success() || failure()) && hashFiles('testresults/*.trx') != ''
         with:
           name: BDD scenarios (Reqnroll)
           path: testresults/*.trx
@@ -162,7 +165,7 @@ jobs:
       # retention policy of its own, the file is the raw evidence.
       - name: Upload test results
         uses: actions/upload-artifact@v4
-        if: success() || failure()
+        if: (success() || failure()) && hashFiles('testresults/*.trx') != ''
         with:
           name: test-results
           path: testresults/*.trx
