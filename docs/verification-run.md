@@ -4,9 +4,13 @@ Durable evidence for the claim this repository exists to support: **the pipeline
 entire system from nothing, unattended, with no stored secret.** GitHub retains Actions logs
 for 90 days, so the numbers and outputs are recorded here rather than linked to.
 
-Everything below is measured from one run. Nothing is carried over from the Azure DevOps
-pipeline's own cold-start run, which used a different agent pool and produced a different
-number.
+Everything below is measured from two runs of this workflow: a cold start from an empty resource
+group (§2), and an incremental run against the group it created (§3a). Nothing is carried over
+from the Azure DevOps pipeline's own cold-start run, which used a different agent pool and
+produced a different number; it appears only in the labelled comparison in §7.
+
+Both recorded runs are on commit `8b5aa42` / `5042e5c`, before the `vite` 6 upgrade that
+followed. The bundle sizes quoted are that build's.
 
 ---
 
@@ -125,6 +129,50 @@ Passed!  - Failed: 0, Passed: 15, Skipped: 0, Total: 15, Duration: 1 s - PizzaSh
 
 All 15 Reqnroll scenarios, rendered as a check run by `dorny/test-reporter` and retained as a
 `.trx` artifact.
+
+---
+
+## 3a. The second run — incremental, and why it matters
+
+One green run shows the pipeline can work. It does not show it works twice. Run
+[34352183376](https://github.com/i-am-shams/coupon-service/actions/runs/34352183376), commit
+`5042e5c`, triggered by a push to `main` roughly 90 minutes later, ran the same six jobs against
+the resource group the cold-start run had already created.
+
+**Green. 8m12s**, 12:38:19Z to 12:46:31Z.
+
+| Job | Cold (from empty) | Incremental |
+|---|---|---|
+| 1 · Build and test | 46s | 45s |
+| 2 · Provision | 7m59s | **3m51s** |
+| 3 · Grant database access | 35s | 42s |
+| 4 · Deploy backend | 4m23s | **51s** |
+| 5 · Build and deploy frontend | 30s | 42s |
+| 6 · Smoke test | 3m13s | **28s** |
+| **Total** | **17m45s** | **8m12s** |
+
+Six assertions passed again. The three jobs that collapsed all collapsed for one reason, and the
+smoke log isolates it to a single line:
+
+```
+cold         PASS  backend serves the menu containing 'Margherita' (200) (attempt 25, 165s)
+incremental  PASS  backend serves the menu containing 'Margherita' (200) (attempt 1,   10s)
+```
+
+Same commit's code, same gateway, same assertion, same expected string. The only difference is
+that the App Service had already completed its first boot — EF Core migrations and seeding — so
+there was nothing to wait for. **That is the evidence that the cold run's 165 seconds was
+latency and not a defect**, which a single run could not have established. Job 4 falls for the
+same reason: `azure/webapps-deploy` returns once the platform accepts the package, and the wait
+that follows belongs to the container, not the deploy.
+
+Job 2's 7m59s → 3m51s is ARM finding every resource already present and converging rather than
+creating. Job 3 re-running is a non-event by design: `grant-db-access.sql` is idempotent, so it
+succeeded against a contained user that already existed instead of failing on a duplicate.
+
+The redirect-URI guard matched again, and the claims-panel check found the deployed bundle clean
+at 410 kB. Neither is a repeat of a cached result — both are re-read from the live deployment on
+every run.
 
 ---
 
