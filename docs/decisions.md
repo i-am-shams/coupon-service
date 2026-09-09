@@ -1846,3 +1846,118 @@ at 1 is the cleanest available proof that the database is new rather than recove
 nothing was carried over, the schema was created by EF migrations at first boot and seeded
 from scratch, and the coupon that discounted the order was redeemed against a fresh
 `UsageCount`.
+
+---
+
+## Phase H — GitHub Actions port (2026-09-09)
+
+### The APIM purge filter matches more than the deployment it belongs to
+
+`azure-pipelines.yml` finds services to purge with
+
+```
+az apim deletedservice list --query "[?starts_with(name, 'apim-couponsvc-lab-')].id"
+```
+
+`az apim deletedservice list` is **subscription-wide**. The prefix is everything in the
+service name except the `uniqueString` suffix, and that suffix is a function of the resource
+group name — so the prefix is shared by every deployment of this project in the subscription,
+and matching on it selects other deployments' soft-deleted services along with this one's.
+
+This was invisible while there was one pipeline. The GitHub Actions workflow deploys into
+`rg-coupon-service-gh`, which makes a second service name under the same prefix, and turns a
+latent bug into a live one in both directions.
+
+**What is actually lost is the 48-hour restore window, not a running service.** The list
+only ever contains services that are already soft-deleted; a purge cannot touch a live APIM.
+So the failure mode is: someone deletes a resource group, intends to restore it, and finds
+the name purged by the other pipeline's next run. That is a real loss — the restore window
+is the only thing standing between an accidental teardown and a 48-hour wait — but it is not
+destruction of anything serving traffic.
+
+It is also not always unwelcome. After a genuine teardown, a soft-deleted service **blocks
+reuse of its own name**, which is the entire reason the purge step exists. A cross-pipeline
+purge of a name nobody intends to restore does the next run a favour. The bug is that it is
+not a decision anyone made, and the log line reads `purging` either way.
+
+**Fixed in the GitHub workflow only.** It resolves the exact service name first and matches
+on equality:
+
+```
+az apim deletedservice list --query "[?name=='${EXPECTED_APIM_NAME}'].id"
+```
+
+The name cannot be computed on the agent — `uniqueString` is an ARM-side hash with no local
+equivalent — so the provision job deploys a resource-less ARM template carrying the identical
+expression from `main.bicep` and reads the name out of its outputs. Asking ARM is the only
+way to get the name rather than a guess at it.
+
+**`azure-pipelines.yml` is deliberately unchanged.** It is retained as the original, and the
+Azure DevOps repository is a frozen deliverable. Anyone reinstating that pipeline as the only
+one should make the same change; anyone running both should make it now.
+
+### The Log Analytics soft-delete check was scoped to the subscription
+
+Same shape, smaller consequence. `log-couponsvc-lab` carries no `uniqueString` suffix, so
+both deployments use the identical workspace name, and the subscription-wide
+`deletedWorkspaces` query reports the other deployment's workspace as if it were this one's.
+
+Nothing acts on the result — the step only prints — so no deployment is affected. But the
+message exists solely to stop a failed recovery being read as a fresh provisioning fault, and
+a message that names the wrong workspace sends the reader to the wrong resource group. The
+workflow queries the resource-group-scoped endpoint instead.
+
+### The storage account name is pinned here, and that still does not pin the URL
+
+`main.bicep` derives the name from `uniqueString(subscription().id, resourceGroup().name)`.
+The resource group name differs between the two pipelines, so the derived name differs, and
+the GitHub deployment would produce a static website URL that is not the one registered on
+`coupon-spa`. The workflow therefore passes `storageAccountName` explicitly —
+`stcouponsvclabgh` — which is what that parameter was added for.
+
+**Pinning the account name does not pin the endpoint.** The URL is
+`https://<account>.zNN.web.core.windows.net`, and `zNN` names the DNS zone of the storage
+stamp the account is placed on, assigned at account creation and not derivable from the name.
+The Azure DevOps account resolves through stamp `pn1prdstr10a` in `centralindia`, whose zone
+is `z29`; the workflow targets the same region, so `expectedFrontendOrigin` is set to
+`https://stcouponsvclabgh.z29.web.core.windows.net`.
+
+That is a **prediction**, and it is left as one on purpose. A region has many stamps and a new
+account can land on a different one. If the prediction is wrong the redirect-URI guard fails
+the frontend job with both strings side by side, which is where a redirect-URI mismatch should
+surface — rather than silently, in a browser, as `AADSTS50011`, after a green run. Phase G
+recorded that the `zNN` segment surviving a delete-and-recreate was luck rather than design;
+this is the same property, being relied on across accounts instead of across time, and guarded
+the same way.
+
+### Separate resource groups, because both pipelines claim the SQL administrator
+
+Each pipeline sets the SQL server's Entra administrator to its own deploying principal, read
+from the `oid` claim of its own ARM token. Sharing a resource group would mean sharing the SQL
+server, and whichever pipeline ran last would own it — the other's grant stage would then fail
+to authenticate, reporting a permissions problem some hours after the change that caused it.
+
+Distinct group names also give distinct `uniqueString` suffixes, which keeps the
+globally-scoped names — SQL server, App Service, APIM — apart without any further thought.
+The storage account is the exception that proves it: pinned, so it needed a distinct literal.
+
+### Contributor at subscription scope is the correct grant for the federated identity
+
+Recorded because it was questioned, and because the intuition that argues against it is a good
+one: the deployment creates two managed identities, and Contributor cannot create role
+assignments.
+
+**It does not need to.** There is no Azure RBAC role assignment anywhere in `infra/` —
+`grep -rn "Microsoft.Authorization" infra/` returns only the comments in `storage.bicep`
+explaining why there is none. The two identities are *created* and *attached* to resources,
+which is `Microsoft.Web/sites/write` and `Microsoft.ApiManagement/service/write`, not
+`Microsoft.Authorization/roleAssignments/write`. They then obtain access through two
+mechanisms that are not RBAC at all: a SQL contained user created in T-SQL by
+`grant-db-access.ps1`, and Easy Auth `allowedApplications` on the App Service.
+
+That is not a coincidence, it is the design. `authentication.md` §9 records the experiment
+that settled it — a Bicep-assigned Storage Blob Data Contributor failed the entire deployment
+with `does not have permission to perform action 'Microsoft.Authorization/roleAssignments/write'`
+— and the frontend upload uses an account key rather than closing that gap with User Access
+Administrator. The GitHub federated identity replicates the Azure DevOps service connection
+exactly: Contributor, subscription scope, nothing else.
