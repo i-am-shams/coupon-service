@@ -6,11 +6,83 @@ into them.
 
 ---
 
+## Current objective: portfolio publication and GitHub Actions port
+
+This repository is being copied to a **public GitHub repository** for portfolio use,
+and its Azure DevOps pipeline is being ported to GitHub Actions. Read this section
+before making any change.
+
+### The claim this project exists to support
+
+The pipeline builds the entire system from an **empty Azure resource group in roughly
+17 minutes** — resource group, every Bicep-defined resource, database schema, database
+access grant, backend, frontend, and a smoke test that verifies the security policies
+actually fire. This was validated by deleting everything and re-running, not assumed.
+
+This claim is the point of the repository. Every other decision is subordinate to it.
+
+### Invariants — do not break these
+
+1. **No stored secrets.** The pipeline authenticates to Azure via workload identity
+   federation. The GitHub Actions port must use OIDC federated credentials
+   (`azure/login@v2`, `permissions: id-token: write`). A stored client secret is a
+   regression, not a shortcut. If a task appears to require one, stop and report.
+2. **No manual steps.** Every stage must run unattended from a clean trigger. If a
+   step cannot be automated, stop and report rather than documenting a workaround.
+3. **Full reproducibility from empty.** The workflow must still provision the resource
+   group itself. Do not assume pre-existing infrastructure.
+4. **The smoke test must still verify security policy enforcement.** A smoke test
+   reduced to a liveness check does not support the claim.
+
+If a proposed change would weaken any of these four, say so before making it.
+
+### Hard prohibitions
+
+- **Never push to, force-push to, or rewrite the `dev.azure.com` remote.** That
+  repository is a contractual deliverable for the company that set this assignment.
+  It is frozen. This work is a copy, not a move, and the copy flows one way.
+- **Never push to a public GitHub remote before the credential scrub is complete and
+  verified.** GitHub keeps force-push-orphaned commits reachable by SHA on public
+  repositories and across the fork network, effectively permanently. A rewrite that
+  follows a bad push does not undo it. Rewrite first, push once.
+- **Never set up mirroring or sync between the two remotes.** A sync job is how
+  redacted history becomes un-redacted later.
+- **Never commit a credential, connection string, key, or token**, including in
+  example config, test fixtures, docs, or this file.
+
+### Known state
+
+- A live reviewer test account (username and password, plain text) is committed in the
+  README and present in git history. Treat any encounter with it as a finding to
+  report, not a value to reuse.
+- The Azure subscription is a free trial expiring around **22 September 2026**. Live
+  demo URLs die then. Evidence for the claim must not depend on a live link.
+- Branch is `master`, 37 commits. It becomes `main` on GitHub.
+
+### Definition of done
+
+- Public GitHub repo, history preserved, no credential in any commit
+- GitHub Actions workflow reaching green from an empty resource group, with no stored
+  secret and no manual step
+- `azure-pipelines.yml` retained in the GitHub copy as the original, unmodified
+- Azure DevOps repository byte-identical to its current state
+- README addressed to a stranger, not to one evaluator
+- `docs/verification-run.md` containing durable evidence of a full cold-start run,
+  since Actions logs expire at 90 days
+
+---
+
 ## What this project is
 
 A pizza ordering service with coupon support, built as a technical assignment. A .NET 8 backend
-behind Azure API Management, a React frontend, deployed to Azure entirely from an Azure DevOps
-pipeline using Bicep.
+behind Azure API Management, a React frontend, deployed to Azure entirely from a pipeline using
+Bicep — no manual step at any point.
+
+There are two pipelines, and they are equivalent: `azure-pipelines.yml` for Azure DevOps and
+`.github/workflows/deploy.yml` for GitHub Actions. Same six stages in the same order, same Bicep
+templates, same scripts under `infra/scripts/`. They deploy into separate resource groups so
+neither can take the SQL Entra administrator away from the other. A change to the deployment is
+not finished until both carry it.
 
 **Read `docs/approach.md` before making design decisions.** It contains the agreed architecture
 and the reasoning behind every choice. If a change would contradict it, stop and ask rather than

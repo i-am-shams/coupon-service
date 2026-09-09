@@ -1,0 +1,844 @@
+# Coupon service — build, provision, deploy, verify, on GitHub Actions.
+#
+# This is the GitHub sibling of azure-pipelines.yml. Same six stages, same order, same
+# reasoning — approach.md §7. Read the comments in azure-pipelines.yml for why the order
+# is what it is; only the differences that are GitHub's own are explained here.
+#
+# The two pipelines deploy to DIFFERENT resource groups on purpose. Both set the SQL
+# server's Entra administrator to their own deploying principal, so a shared resource
+# group would mean whichever ran last owned the server and the other's grant stage would
+# fail to authenticate. Distinct groups also give distinct uniqueString() suffixes, which
+# keeps the globally-scoped names (SQL server, App Service, APIM) apart. The storage
+# account name has no suffix here — it is pinned — so it is given its own literal below.
+#
+# No secret appears in this file. Authentication is workload identity federation over
+# OIDC: azure/login@v2 exchanges the job's short-lived id-token for an ARM token. The
+# client, tenant and subscription IDs are repository VARIABLES, not secrets — all three
+# are public identifiers, and putting them in `vars` keeps them readable in logs, where a
+# masked value would only make a misconfiguration harder to diagnose.
+
+name: Deploy coupon service
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Provisioning is not safe to interrupt: a cancelled run can leave a half-created
+# resource group, and APIM in particular takes ~40 minutes to create and cannot be
+# resumed. So queue, never cancel.
+concurrency:
+  group: coupon-service-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege at the top. Jobs that touch Azure re-declare id-token: write, because
+# a job-level permissions block replaces this one rather than adding to it.
+permissions:
+  contents: read
+
+env:
+  # --- Deployment target -------------------------------------------------------------
+  # DISTINCT from the Azure DevOps pipeline's rg-coupon-service. See the header.
+  RESOURCE_GROUP_NAME: rg-coupon-service-gh
+  LOCATION: centralindia
+
+  # --- Bicep parameters --------------------------------------------------------------
+  NAME_PREFIX: couponsvc
+  ENVIRONMENT_NAME: lab
+
+  # Pinned, not derived. main.bicep would otherwise build this from
+  # uniqueString(subscription().id, resourceGroup().name), which is stable across a
+  # delete-and-recreate of the same group but changes with the group NAME — and this
+  # pipeline deliberately uses a different group name from the Azure DevOps one. The
+  # static website URL is registered as an Entra redirect URI and Entra matches it as an
+  # exact string, so the name is a literal here.
+  STORAGE_ACCOUNT_NAME: stcouponsvclabgh
+
+  # The coupon-api and coupon-spa app registrations, created on Day 0. Client IDs are
+  # public identifiers, not credentials — they appear in every token this API issues.
+  API_CLIENT_ID: 90a27142-cffb-4879-873a-bc0a99112ce7
+  SPA_CLIENT_ID: 04a724e0-6bd9-4285-ab7f-b00d2ce30e2c
+  TENANT_ID: 8edd202c-5474-4669-9b35-253da7a27cd2
+
+  # The origin registered as a redirect URI on coupon-spa, by hand, as a Day 0 item.
+  #
+  # PREDICTED, not observed — this deployment has never run. The account name is pinned
+  # above, but the zNN segment is not derivable from it: it names the DNS zone of the
+  # storage stamp the account lands on, assigned at account creation. z29 is what the
+  # Azure DevOps deployment's account resolves to in this same region (centralindia,
+  # stamp pn1prdstr10a), and LOCATION here is identical — but a new account can land on a
+  # different stamp in the same region.
+  #
+  # Left as a prediction on purpose. If it is wrong, the redirect-URI guard in the
+  # frontend job fails the run with both strings side by side, which is where that
+  # mismatch should surface — not in a browser, as AADSTS50011, after a green deploy.
+  EXPECTED_FRONTEND_ORIGIN: https://stcouponsvclabgh.z29.web.core.windows.net
+
+  # Used by API Management for service notifications only.
+  APIM_PUBLISHER_EMAIL: publisher@example.com
+  APIM_PUBLISHER_NAME: Coupon Service
+
+  # Display name recorded for the SQL Entra administrator. Cosmetic — it is the object ID
+  # that grants access. Named for this pipeline; "serviceConnection", which the Azure
+  # DevOps pipeline interpolates here, is an Azure DevOps concept and this is not that.
+  SQL_ADMIN_LOGIN: github-actions-pipeline
+
+  # --- Build -------------------------------------------------------------------------
+  BUILD_CONFIGURATION: Release
+  API_PROJECT: src/PizzaShop.Api/PizzaShop.Api.csproj
+
+  # Pinned rather than floating. grant-db-access.ps1 installs this module itself if it is
+  # absent, without a version — harmless on a machine that already has one, a silent
+  # upgrade on a fresh runner. Installing an exact version first means the script's
+  # Get-Module -ListAvailable check succeeds and its own unpinned install never runs.
+  SQLSERVER_MODULE_VERSION: 22.4.5.1
+
+jobs:
+
+  # ===================================================================================
+  # 1. Build and test
+  # ===================================================================================
+  build-and-test:
+    name: 1 · Build and test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # dorny/test-reporter publishes the scenario results as a check run.
+      checks: write
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - name: Install .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # There is no packages.lock.json in this solution, so the cache key is the hash of
+      # the project files. A stale hit is harmless — dotnet restore still resolves and
+      # downloads whatever is missing.
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'PizzaShop.sln') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore PizzaShop.sln
+
+      - name: Build
+        run: dotnet build PizzaShop.sln --configuration "$BUILD_CONFIGURATION" --no-restore
+
+      # The BDD scenarios run against SQLite in-memory through WebApplicationFactory, so
+      # they need no Azure resource and no database — which is why this job comes before
+      # anything is provisioned.
+      - name: Test
+        run: >-
+          dotnet test PizzaShop.sln
+          --configuration "$BUILD_CONFIGURATION"
+          --no-build
+          --logger trx
+          --results-directory "${{ github.workspace }}/testresults"
+
+      # 15 Reqnroll scenarios. This renders them as a check run with each scenario named,
+      # which is the nearest equivalent to PublishTestResults@2 in the Azure DevOps
+      # pipeline. It runs on failure too — a failed run is exactly when the per-scenario
+      # breakdown is worth having.
+      - name: Publish scenario results
+        uses: dorny/test-reporter@v1
+        if: success() || failure()
+        with:
+          name: BDD scenarios (Reqnroll)
+          path: testresults/*.trx
+          reporter: dotnet-trx
+          fail-on-error: true
+
+      # The .trx as well as the rendered report: the report is a GitHub object with a
+      # retention policy of its own, the file is the raw evidence.
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: success() || failure()
+        with:
+          name: test-results
+          path: testresults/*.trx
+          if-no-files-found: error
+
+      - name: Publish API
+        run: >-
+          dotnet publish "$API_PROJECT"
+          --configuration "$BUILD_CONFIGURATION"
+          --no-build
+          --output "${{ runner.temp }}/api"
+
+      - name: Archive API
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/api"
+          zip -qr "${{ runner.temp }}/api.zip" .
+
+      # Every artifact name in this workflow is distinct. upload-artifact@v4 artifacts are
+      # immutable: a second upload under a name already used in the run fails the step.
+      - name: Upload API artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-package
+          path: ${{ runner.temp }}/api.zip
+          if-no-files-found: error
+
+      # infra/ and web/ travel as artifacts rather than being re-checked-out by each job,
+      # so every job deploys the revision this job tested.
+      - name: Upload infrastructure sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-sources
+          path: infra/
+          if-no-files-found: error
+
+      # The frontend cannot be built here — the gateway URL is compiled into the
+      # JavaScript and is not known until provisioning has run.
+      - name: Upload frontend sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-sources
+          path: web/
+          if-no-files-found: error
+
+  # ===================================================================================
+  # 2. Provision
+  # ===================================================================================
+  provision:
+    name: 2 · Provision
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    permissions:
+      contents: read
+      id-token: write
+    # All eleven Bicep outputs the pipeline consumes, named one by one. Not a single JSON
+    # blob: a job output is a string, so a blob would have to be re-parsed by every
+    # consumer, and a typo in a key would surface as an empty value at the point of use
+    # rather than here.
+    outputs:
+      appServiceName: ${{ steps.deploy.outputs.appServiceName }}
+      apiIdentityClientId: ${{ steps.deploy.outputs.apiIdentityClientId }}
+      apiIdentityName: ${{ steps.deploy.outputs.apiIdentityName }}
+      sqlServerFqdn: ${{ steps.deploy.outputs.sqlServerFqdn }}
+      sqlDatabaseName: ${{ steps.deploy.outputs.sqlDatabaseName }}
+      apimServiceName: ${{ steps.deploy.outputs.apimServiceName }}
+      apimGatewayUrl: ${{ steps.deploy.outputs.apimGatewayUrl }}
+      apimSubscriptionName: ${{ steps.deploy.outputs.apimSubscriptionName }}
+      frontendSubscriptionName: ${{ steps.deploy.outputs.frontendSubscriptionName }}
+      storageAccountName: ${{ steps.deploy.outputs.storageAccountName }}
+      frontendOrigin: ${{ steps.deploy.outputs.frontendOrigin }}
+    steps:
+
+      - name: Download infrastructure sources
+        uses: actions/download-artifact@v4
+        with:
+          name: infra-sources
+          path: infra
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy infra/main.bicep
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+          echo "==> Resource group"
+          az group create \
+            --name "${RESOURCE_GROUP_NAME}" \
+            --location "${LOCATION}" \
+            --output none
+
+          # -------------------------------------------------------------------------
+          # Resolve the APIM name this deployment will actually use.
+          #
+          # main.bicep builds it from uniqueString(subscription().id,
+          # resourceGroup().name), which is an ARM-side hash with no local equivalent —
+          # it cannot be computed here, only asked for. This resource-less template asks,
+          # using the identical expression, so what comes back is the name and not a
+          # guess at it.
+          #
+          # It is needed BEFORE the deployment, because the purge below has to run first.
+          # -------------------------------------------------------------------------
+          echo "==> Resolving the API Management name for this resource group"
+          cat > "${RUNNER_TEMP}/resolve-names.json" <<JSON
+          {
+            "\$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+            "contentVersion": "1.0.0.0",
+            "resources": [],
+            "outputs": {
+              "apimServiceName": {
+                "type": "string",
+                "value": "[concat('apim-${NAME_PREFIX}-${ENVIRONMENT_NAME}-', substring(uniqueString(subscription().id, resourceGroup().name), 0, 6))]"
+              }
+            }
+          }
+          JSON
+
+          EXPECTED_APIM_NAME=$(az deployment group create \
+            --resource-group "${RESOURCE_GROUP_NAME}" \
+            --name "resolve-names-${GITHUB_RUN_ID}" \
+            --template-file "${RUNNER_TEMP}/resolve-names.json" \
+            --query properties.outputs.apimServiceName.value -o tsv)
+          echo "    ${EXPECTED_APIM_NAME}"
+
+          # -------------------------------------------------------------------------
+          # APIM soft-delete purge.
+          #
+          # Deleting the resource group does not free an API Management name. The service
+          # is soft-deleted for 48 hours and keeps its name reserved, so recreating it
+          # fails with "service name is not available" — which reads as a naming
+          # collision rather than as the residue of the previous teardown.
+          #
+          # Matched on the EXACT expected name. The Azure DevOps pipeline uses
+          # starts_with(name, 'apim-couponsvc-lab-') here, which is a real bug: deleted
+          # services are listed subscription-wide, that prefix is shared by every
+          # deployment of this project, and a purge is irreversible. Left as a prefix,
+          # this pipeline would have destroyed the Azure DevOps deployment's soft-deleted
+          # service on its first run. See docs/decisions.md.
+          #
+          # `az apim deletedservice purge`, NOT `az rest --method delete`: the purge is a
+          # long-running ARM operation and az polls it where a raw HTTP call does not.
+          # -------------------------------------------------------------------------
+          echo "==> Purging any soft-deleted API Management service for THIS deployment"
+          DELETED=$(az apim deletedservice list \
+            --query "[?name=='${EXPECTED_APIM_NAME}'].id" -o tsv || true)
+
+          if [ -z "${DELETED}" ]; then
+            echo "    none found"
+          else
+            for id in ${DELETED}; do
+              # The id is
+              #   /subscriptions/<sub>/providers/Microsoft.ApiManagement/locations/<loc>/deletedservices/<name>
+              # and purge takes the name and the location as separate arguments.
+              APIM_NAME="${id##*/}"
+              APIM_LOCATION="${id%/deletedservices/*}"
+              APIM_LOCATION="${APIM_LOCATION##*/}"
+
+              echo "    purging ${APIM_NAME} (${APIM_LOCATION})"
+              az apim deletedservice purge \
+                --service-name "${APIM_NAME}" \
+                --location "${APIM_LOCATION}" \
+                --output none
+
+              # Belt and braces. The CLI waits for the purge operation itself, but ARM
+              # releases the reserved name behind it. checkNameAvailability asks exactly
+              # the question the deployment is about to ask, so ask it here — where a
+              # failure says what it means, instead of arriving as a template error.
+              echo "    waiting for the name to be released"
+              NAME_FREE=false
+              for attempt in $(seq 1 30); do
+                AVAILABLE=$(az rest --method post \
+                  --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/providers/Microsoft.ApiManagement/checkNameAvailability?api-version=2022-08-01" \
+                  --headers "Content-Type=application/json" \
+                  --body "{\"name\":\"${APIM_NAME}\",\"type\":\"Microsoft.ApiManagement/service\"}" \
+                  --query nameAvailable -o tsv 2>/dev/null || echo "false")
+
+                if [ "${AVAILABLE}" = "true" ]; then
+                  echo "    ${APIM_NAME} released (attempt ${attempt} of 30, 10s apart)"
+                  NAME_FREE=true
+                  break
+                fi
+                sleep 10
+              done
+
+              if [ "${NAME_FREE}" != "true" ]; then
+                echo "::error::${APIM_NAME} is still reserved 300s after its purge reported complete. The Bicep deployment would fail with 'service name is not available'. Re-run; if it persists the soft-delete has not been released and the 48-hour window applies."
+                exit 1
+              fi
+            done
+          fi
+
+          # -------------------------------------------------------------------------
+          # The storage account name is pinned, and a pinned name is globally unique
+          # across all of Azure — so it can be held by an account in someone else's
+          # subscription, and the only symptom would be a Bicep failure deep in the
+          # deployment.
+          #
+          # Asking here costs one call and names the cause. "Not available" is expected
+          # and correct once this deployment owns the account, so that case is checked
+          # rather than assumed.
+          # -------------------------------------------------------------------------
+          echo "==> Checking the pinned storage account name"
+          STORAGE_FREE=$(az storage account check-name \
+            --name "${STORAGE_ACCOUNT_NAME}" --query nameAvailable -o tsv)
+          if [ "${STORAGE_FREE}" = "true" ]; then
+            echo "    ${STORAGE_ACCOUNT_NAME} is free — this deployment will create it"
+          elif az storage account show \
+                 --name "${STORAGE_ACCOUNT_NAME}" \
+                 --resource-group "${RESOURCE_GROUP_NAME}" --output none 2>/dev/null; then
+            echo "    ${STORAGE_ACCOUNT_NAME} already exists in ${RESOURCE_GROUP_NAME} — ours"
+          else
+            echo "::error::Storage account name ${STORAGE_ACCOUNT_NAME} is taken and is not in ${RESOURCE_GROUP_NAME}. Storage account names are globally unique. Pick another, set STORAGE_ACCOUNT_NAME and EXPECTED_FRONTEND_ORIGIN to match, and register the new origin as a redirect URI on coupon-spa."
+            exit 1
+          fi
+
+          # -------------------------------------------------------------------------
+          # Log Analytics soft-delete.
+          #
+          # A deleted workspace is held for 14 days with its name reserved — the same
+          # shape of problem as the APIM purge above, with a different resolution,
+          # because there is no purge API for it. Recreating a workspace with the same
+          # name, in the same resource group and location, RECOVERS the soft-deleted
+          # one. That is exactly what this deployment does, and it is the outcome we
+          # want: the name and the workspace ID come back.
+          #
+          # Scoped to THIS resource group, not the subscription. The workspace name has
+          # no uniqueString suffix, so every deployment of this project uses the same
+          # one, and the subscription-wide list the Azure DevOps pipeline queries would
+          # report the other deployment's workspace as if it were this one's. Harmless
+          # to the deployment, misleading to whoever reads the log — which is the entire
+          # purpose of a message that exists only to be read.
+          # -------------------------------------------------------------------------
+          echo "==> Checking for a soft-deleted Log Analytics workspace in ${RESOURCE_GROUP_NAME}"
+          DELETED_WS=$(az rest --method get \
+            --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP_NAME}/providers/Microsoft.OperationalInsights/deletedWorkspaces?api-version=2023-09-01" \
+            --query "value[?name=='log-${NAME_PREFIX}-${ENVIRONMENT_NAME}'].name" -o tsv || true)
+
+          if [ -z "${DELETED_WS}" ]; then
+            echo "    none found"
+          else
+            echo "    found: ${DELETED_WS}, inside its 14-day soft-delete window"
+            echo "    The Bicep deployment will RECOVER it rather than create a new one."
+            echo "    That is the intended outcome and needs no action: recovery requires the"
+            echo "    same name, resource group and location, and this template supplies all"
+            echo "    three. If provisioning fails on log-${NAME_PREFIX}-${ENVIRONMENT_NAME},"
+            echo "    this is the reason - there is no purge API for a workspace, so the only"
+            echo "    options are to recover it or to wait the window out."
+          fi
+
+          # -------------------------------------------------------------------------
+          # The SQL Entra administrator has to be this pipeline's own principal, and ARM
+          # wants its OBJECT ID. Recovering an object ID normally means `az ad sp show`,
+          # a Microsoft Graph call this service principal has no permission to make.
+          #
+          # The ARM access token already carries it: `oid` is the principal's object ID
+          # in this tenant. Reading it out of the token needs no directory permission at
+          # all, which is what keeps the federated identity at Contributor and nothing
+          # more.
+          #
+          # The token is never echoed and never leaves this step.
+          # -------------------------------------------------------------------------
+          echo "==> Deriving the pipeline principal's object ID from the ARM token"
+          ARM_TOKEN=$(az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv)
+          DEPLOYING_PRINCIPAL_OBJECT_ID=$(printf '%s' "${ARM_TOKEN}" | cut -d. -f2 | python3 -c \
+            'import sys,base64,json; p=sys.stdin.read().strip(); p+="="*(-len(p)%4); print(json.loads(base64.urlsafe_b64decode(p))["oid"])')
+          unset ARM_TOKEN
+          echo "    object ID: ${DEPLOYING_PRINCIPAL_OBJECT_ID}"
+
+          echo "==> Bicep deployment"
+          az deployment group create \
+            --resource-group "${RESOURCE_GROUP_NAME}" \
+            --name "coupon-service-${GITHUB_RUN_ID}" \
+            --template-file infra/main.bicep \
+            --parameters \
+                location="${LOCATION}" \
+                namePrefix="${NAME_PREFIX}" \
+                environmentName="${ENVIRONMENT_NAME}" \
+                storageAccountName="${STORAGE_ACCOUNT_NAME}" \
+                apiClientId="${API_CLIENT_ID}" \
+                deployingPrincipalObjectId="${DEPLOYING_PRINCIPAL_OBJECT_ID}" \
+                sqlAdminLogin="${SQL_ADMIN_LOGIN}" \
+                apimPublisherEmail="${APIM_PUBLISHER_EMAIL}" \
+                apimPublisherName="${APIM_PUBLISHER_NAME}" \
+            --output none
+
+          echo "==> Reading outputs"
+          OUTPUTS=$(az deployment group show \
+            --resource-group "${RESOURCE_GROUP_NAME}" \
+            --name "coupon-service-${GITHUB_RUN_ID}" \
+            --query properties.outputs -o json)
+
+          get() { printf '%s' "${OUTPUTS}" | python3 -c "import sys,json;print(json.load(sys.stdin)['$1']['value'])"; }
+
+          # Republished as job outputs, one line each, so a missing one is a missing line
+          # here rather than an absent key inside a blob discovered three jobs later.
+          for name in appServiceName apiIdentityClientId apiIdentityName \
+                      sqlServerFqdn sqlDatabaseName \
+                      apimServiceName apimGatewayUrl apimSubscriptionName \
+                      frontendSubscriptionName storageAccountName frontendOrigin; do
+            value=$(get "${name}")
+            if [ -z "${value}" ]; then
+              echo "::error::Bicep output ${name} is empty. The deployment succeeded but did not return it."
+              exit 1
+            fi
+            echo "${name}=${value}" >> "${GITHUB_OUTPUT}"
+          done
+
+          echo ""
+          echo "Gateway  : $(get apimGatewayUrl)"
+          echo "Backend  : $(get appServiceName)"
+          echo "Database : $(get sqlServerFqdn)/$(get sqlDatabaseName)"
+          echo "Frontend : $(get frontendOrigin)"
+          echo ""
+          echo "The frontend origin above must be registered as a redirect URI on the coupon-spa"
+          echo "app registration, character for character. Entra does exact string matching. The"
+          echo "storage account name is pinned so it is stable, but the zNN DNS zone segment is"
+          echo "assigned at account creation and is not derivable from the name — the frontend"
+          echo "job compares this value against EXPECTED_FRONTEND_ORIGIN and fails if they differ."
+
+  # ===================================================================================
+  # 3. Grant database access
+  # ===================================================================================
+  #
+  # Before the backend is deployed. The application runs its EF Core migrations at
+  # startup, so an app deployed before its database user exists starts, fails, and
+  # reports a deployment problem for what is actually a permissions problem.
+  grant-db-access:
+    name: 3 · Grant database access
+    runs-on: ubuntu-latest
+    # provision listed DIRECTLY. `needs.<job>.outputs` reaches only jobs this one
+    # directly needs — a transitive dependency resolves to an empty string, silently, and
+    # the failure surfaces wherever the empty value is eventually used. Same trap as
+    # stageDependencies in Azure DevOps.
+    needs: [build-and-test, provision]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+
+      - name: Download infrastructure sources
+        uses: actions/download-artifact@v4
+        with:
+          name: infra-sources
+          path: infra
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # Pinned. grant-db-access.ps1 falls back to an unpinned Install-Module when it
+      # finds none available, which on a fresh runner means "whatever PSGallery shipped
+      # this morning". Installing the exact version first makes that fallback dead code.
+      - name: Install the SqlServer module (pinned)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module -Name SqlServer `
+            -RequiredVersion $env:SQLSERVER_MODULE_VERSION `
+            -Scope CurrentUser -Force -AllowClobber -Repository PSGallery
+          Get-Module -ListAvailable -Name SqlServer | Select-Object Name, Version
+
+      # `az` is already signed in as the federated identity — which is the SQL server's
+      # Entra administrator, and the only principal that can create a user in this
+      # database. There is no SQL login on the server to fall back on.
+      - name: Run grant-db-access.ps1
+        shell: pwsh
+        env:
+          SQL_SERVER_FQDN: ${{ needs.provision.outputs.sqlServerFqdn }}
+          SQL_DATABASE_NAME: ${{ needs.provision.outputs.sqlDatabaseName }}
+          API_IDENTITY_NAME: ${{ needs.provision.outputs.apiIdentityName }}
+          API_IDENTITY_CLIENT_ID: ${{ needs.provision.outputs.apiIdentityClientId }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./infra/scripts/grant-db-access.ps1 `
+            -SqlServerFqdn  $env:SQL_SERVER_FQDN `
+            -DatabaseName   $env:SQL_DATABASE_NAME `
+            -AppName        $env:API_IDENTITY_NAME `
+            -AppClientId    $env:API_IDENTITY_CLIENT_ID `
+            -ScriptPath     ./infra/scripts/grant-db-access.sql
+
+  # ===================================================================================
+  # 4. Deploy backend
+  # ===================================================================================
+  deploy-backend:
+    name: 4 · Deploy backend
+    runs-on: ubuntu-latest
+    # provision listed even though grant-db-access already needs it — see the note on
+    # job 3. This job reads provision's outputs, so it must need it directly.
+    needs: [provision, grant-db-access]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+
+      - name: Download API artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: api-package
+          path: ${{ runner.temp }}/api
+
+      # An empty job output reaches azure/webapps-deploy as a missing app-name, and the
+      # resulting error says nothing about where the value should have come from. This
+      # names the cause instead.
+      - name: Check the provision outputs resolved
+        shell: bash
+        env:
+          APP_SERVICE_NAME: ${{ needs.provision.outputs.appServiceName }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_SERVICE_NAME}" ]; then
+            echo "::error::appServiceName is empty. The provision job output did not resolve — check that this job lists provision in needs."
+            exit 1
+          fi
+          echo "Deploying to ${APP_SERVICE_NAME}"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to App Service
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ needs.provision.outputs.appServiceName }}
+          package: ${{ runner.temp }}/api/api.zip
+
+      # No verification step here on purpose. This action reports success while the
+      # container is still warming, so anything checked at this point would be checking
+      # the previous state of the app. The smoke job polls, which is the only reliable
+      # way to know the new build is serving.
+
+  # ===================================================================================
+  # 5. Build and deploy frontend
+  # ===================================================================================
+  #
+  # After the backend deploy because the gateway URL is compiled into the JavaScript, and
+  # before the smoke test because the smoke test should run against the finished system.
+  deploy-frontend:
+    name: 5 · Build and deploy frontend
+    runs-on: ubuntu-latest
+    needs: [provision, deploy-backend]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+
+      - name: Download frontend sources
+        uses: actions/download-artifact@v4
+        with:
+          name: web-sources
+          path: web
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # One step, because the APIM subscription key is fetched, used and discarded inside
+      # it. It never becomes a job output and never lands in a file. Rule 7.
+      - name: Build and upload the frontend
+        shell: bash
+        working-directory: web
+        env:
+          APIM_SERVICE_NAME: ${{ needs.provision.outputs.apimServiceName }}
+          APIM_GATEWAY_URL: ${{ needs.provision.outputs.apimGatewayUrl }}
+          FRONTEND_SUBSCRIPTION_NAME: ${{ needs.provision.outputs.frontendSubscriptionName }}
+          FRONTEND_ORIGIN: ${{ needs.provision.outputs.frontendOrigin }}
+          PROVISIONED_STORAGE_ACCOUNT_NAME: ${{ needs.provision.outputs.storageAccountName }}
+        run: |
+          set -euo pipefail
+
+          # -------------------------------------------------------------------------
+          # The redirect URI guard.
+          #
+          # Entra matches redirect URIs as exact strings with no wildcards. A mismatch
+          # fails nowhere on the server: the frontend deploys green, the smoke test
+          # passes, and sign-in then fails in the browser with AADSTS50011. This turns
+          # that into a job failure with both strings side by side.
+          #
+          # It compares the deployed origin against EXPECTED_FRONTEND_ORIGIN, which is a
+          # record of what a human registered. It cannot read the registration itself —
+          # that is a Microsoft Graph call this principal has no permission to make.
+          #
+          # On the FIRST run of this pipeline the expected value is a PREDICTION of the
+          # zNN DNS zone segment, not an observation. If it fails here, the deployed
+          # value printed below is the real one: register it on coupon-spa alongside the
+          # localhost URI and set EXPECTED_FRONTEND_ORIGIN to match.
+          # -------------------------------------------------------------------------
+          echo "==> Redirect URI guard"
+          echo "    deployed  : ${FRONTEND_ORIGIN}"
+          echo "    registered: ${EXPECTED_FRONTEND_ORIGIN}"
+          if [ "${FRONTEND_ORIGIN}" != "${EXPECTED_FRONTEND_ORIGIN}" ]; then
+            echo "::error::Deployed frontend origin does not match the origin registered on coupon-spa. Sign-in would fail with AADSTS50011. Register ${FRONTEND_ORIGIN} as a redirect URI on the SPA platform, alongside the localhost one, and set EXPECTED_FRONTEND_ORIGIN in this workflow to match."
+            exit 1
+          fi
+          echo "    match"
+
+          echo "==> Reading the frontend subscription key"
+          SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          FRONTEND_KEY=$(az rest --method post \
+            --url "https://management.azure.com/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP_NAME}/providers/Microsoft.ApiManagement/service/${APIM_SERVICE_NAME}/subscriptions/${FRONTEND_SUBSCRIPTION_NAME}/listSecrets?api-version=2022-08-01" \
+            --query primaryKey -o tsv)
+          if [ -z "${FRONTEND_KEY}" ]; then
+            echo "::error::Could not read the frontend APIM subscription key."
+            exit 1
+          fi
+          # Belt and braces. The key is used only as a build-time variable below, but a
+          # masked value cannot leak through an unrelated command that happens to echo
+          # its environment.
+          echo "::add-mask::${FRONTEND_KEY}"
+
+          echo "==> npm ci"
+          npm ci --no-audit --no-fund
+
+          echo "==> npm run build"
+          # Only VITE_-prefixed variables reach the bundle. The build fails on a missing
+          # one rather than shipping `undefined`, which would surface as a sign-in that
+          # silently does nothing.
+          VITE_GATEWAY_URL="${APIM_GATEWAY_URL}" \
+          VITE_SPA_CLIENT_ID="${SPA_CLIENT_ID}" \
+          VITE_TENANT_ID="${TENANT_ID}" \
+          VITE_API_SCOPE="api://${API_CLIENT_ID}/Orders.Write" \
+          VITE_SUBSCRIPTION_KEY="${FRONTEND_KEY}" \
+            npm run build
+
+          # -------------------------------------------------------------------------
+          # The development-only token claims panel must not ship. It is stripped by
+          # import.meta.env.DEV, which Vite replaces with `false` in a production build,
+          # leaving dead code that Rollup removes along with the module.
+          #
+          # That is the mechanism. This is the proof. A claims dump on a public site is
+          # exactly the thing a reviewer screenshots, so "it should be stripped" is not
+          # good enough on its own.
+          # -------------------------------------------------------------------------
+          echo "==> Checking the dev-only claims panel was stripped"
+          if grep -rq "PIZZASHOP_DEV_ONLY_TOKEN_CLAIMS_PANEL" dist/; then
+            echo "::error::The development-only token claims panel is present in the production bundle. It renders decoded access token claims and must never be deployed."
+            exit 1
+          fi
+          echo "    absent"
+
+          # -------------------------------------------------------------------------
+          # Static website is a data-plane setting with no ARM property, so it cannot
+          # live in Bicep. This call works over OAuth with the pipeline's Contributor,
+          # because it maps to the management-plane action
+          # Microsoft.Storage/storageAccounts/blobServices/write.
+          #
+          # The 404 document is index.html so a refresh on a client-side route does not
+          # 404. approach.md section 6.
+          # -------------------------------------------------------------------------
+          echo "==> Enabling the static website"
+          az storage blob service-properties update \
+            --account-name "${PROVISIONED_STORAGE_ACCOUNT_NAME}" \
+            --auth-mode login \
+            --static-website true \
+            --index-document index.html \
+            --404-document index.html \
+            --output none
+
+          # -------------------------------------------------------------------------
+          # Uploading blob CONTENT is a data action, which Contributor does not include:
+          # over OAuth it returns "You do not have the required permissions".
+          #
+          # The obvious fix — have Bicep assign Storage Blob Data Contributor — does not
+          # work either. Contributor's notActions include Microsoft.Authorization/*/Write,
+          # so this principal cannot create a role assignment at all, and a role
+          # assignment inside a template fails the whole deployment before a single
+          # resource is touched.
+          #
+          # Closing that gap would mean granting the federated identity User Access
+          # Administrator: the power to grant itself any role, on anything, permanently.
+          # The account key is the smaller grant by a wide margin — Contributor already
+          # includes listKeys, so this principal can obtain the key regardless. Fetching
+          # it here adds no privilege it does not already have.
+          #
+          # The key is read, used and discarded inside this one step. Rule 7.
+          # -------------------------------------------------------------------------
+          echo "==> Uploading the bundle"
+          ACCOUNT_KEY=$(az storage account keys list \
+            --account-name "${PROVISIONED_STORAGE_ACCOUNT_NAME}" \
+            --resource-group "${RESOURCE_GROUP_NAME}" \
+            --query "[0].value" -o tsv)
+          if [ -z "${ACCOUNT_KEY}" ]; then
+            echo "::error::Could not read the storage account key."
+            exit 1
+          fi
+          echo "::add-mask::${ACCOUNT_KEY}"
+
+          az storage blob upload-batch \
+            --account-name "${PROVISIONED_STORAGE_ACCOUNT_NAME}" \
+            --account-key "${ACCOUNT_KEY}" \
+            --destination '$web' \
+            --source dist \
+            --overwrite \
+            --output none
+          unset ACCOUNT_KEY
+
+          echo ""
+          echo "Frontend: ${FRONTEND_ORIGIN}"
+
+  # ===================================================================================
+  # 6. Smoke test
+  # ===================================================================================
+  smoke-test:
+    name: 6 · Smoke test
+    runs-on: ubuntu-latest
+    needs: [build-and-test, provision, deploy-frontend]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+
+      - name: Download infrastructure sources
+        uses: actions/download-artifact@v4
+        with:
+          name: infra-sources
+          path: infra
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The subscription key is fetched and used inside a single step, so it is never a
+      # job output, never an artifact, and never in a file. Rule 7.
+      - name: Run smoke-test.ps1
+        shell: pwsh
+        env:
+          APIM_SERVICE_NAME: ${{ needs.provision.outputs.apimServiceName }}
+          APIM_GATEWAY_URL: ${{ needs.provision.outputs.apimGatewayUrl }}
+          APIM_SUBSCRIPTION_NAME: ${{ needs.provision.outputs.apimSubscriptionName }}
+          FRONTEND_ORIGIN: ${{ needs.provision.outputs.frontendOrigin }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $subscriptionId = az account show --query id -o tsv
+          $url = "https://management.azure.com/subscriptions/$subscriptionId" +
+                 "/resourceGroups/$env:RESOURCE_GROUP_NAME" +
+                 "/providers/Microsoft.ApiManagement/service/$env:APIM_SERVICE_NAME" +
+                 "/subscriptions/$env:APIM_SUBSCRIPTION_NAME/listSecrets?api-version=2022-08-01"
+
+          $key = az rest --method post --url $url --query primaryKey -o tsv
+          if ([string]::IsNullOrWhiteSpace($key)) {
+            throw 'Could not read the APIM subscription key.'
+          }
+          Write-Host "::add-mask::$key"
+
+          ./infra/scripts/smoke-test.ps1 `
+              -GatewayUrl      $env:APIM_GATEWAY_URL `
+              -SubscriptionKey $key `
+              -FrontendOrigin  $env:FRONTEND_ORIGIN
