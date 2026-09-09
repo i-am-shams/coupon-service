@@ -1,6 +1,6 @@
 # Coupon Service — Execution Plan
 
-**Project:** Pizza coupon service · technical assignment for Bangladesh Software Solution
+**Project:** Pizza coupon service · technical assignment for a software consultancy
 **Source of truth:** `docs/approach.md` (the approved approach document)
 
 ---

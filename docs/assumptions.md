@@ -25,10 +25,15 @@ last section says what would be done next and in what order.
 5. **Orders are stored but not fulfilled.** There is no payment step, no kitchen, no dispatch, and
    no order status beyond "created".
 
-6. **The reviewer uses a pre-created test account**, documented in [../README.md](../README.md).
-   It is a **member** of the tenant rather than a guest, so no first-sign-in consent prompt can
-   appear in front of them. Entra **security defaults are disabled** on this tenant, so no MFA
-   registration or challenge can either.
+6. **Evaluation access is provided on request.** An earlier revision shipped a pre-created reviewer
+   account with its credential written into [../README.md](../README.md). That account is now
+   disabled and the credential is gone from this repository and its history, so the README
+   documents none.
+
+   The reasoning is kept because it is a live Day 0 consideration for anyone reproducing this, not
+   because an account exists today. Such an account has to be a **member** of the tenant rather
+   than a guest, so no first-sign-in consent prompt can appear in front of them. Entra **security
+   defaults must be disabled** on the tenant, so no MFA registration or challenge can either.
 
    Both halves of that matter, and the second is a property of the *tenant* rather than of the
    account. So it does not survive a rebuild. Security defaults are on by default. A tenant

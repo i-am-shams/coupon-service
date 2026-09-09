@@ -1,30 +1,61 @@
 # Pizza Shop — coupon service
 
-A pizza ordering service with coupon support. .NET 8 API behind Azure API Management, React
-frontend, Azure SQL, deployed end to end from an Azure DevOps pipeline using Bicep.
+A pizza ordering service with coupon support. .NET 8 minimal API behind Azure API Management, a
+React + MSAL frontend, Azure SQL reached without a password. Infrastructure is Bicep; deployment
+is a six-stage pipeline with no manual step in it.
 
-**Technical assignment for an interview process · Khalid Shams**
+**A technical assignment for a software consultancy · [Khalid Shams](https://khalid-shams.vercel.app)**
 
 ---
 
-## Try it
+## The claim
 
-### **<https://stcouponsvclabdtjori.z29.web.core.windows.net>**
+**An empty resource group becomes the running system in 17m45s.** The resource group itself,
+every Azure resource, the database schema, the database access grant, the backend, the frontend,
+and a smoke test that checks the security policies actually fire — unattended, with no stored
+secret anywhere.
 
-Sign-in is only needed to place an order. Browsing the menu and checking a coupon are anonymous.
+Measured, not designed for.
+**[Open the run log](https://github.com/i-am-shams/coupon-service/actions/runs/34342033409)** —
+9 September 2026, six green jobs, starting from a resource group that did not exist.
 
-**Test account**
+| | |
+|---|---|
+| Empty resource group → green smoke test | **17m45s** |
+| Pipeline jobs, no manual step | **6** |
+| Stored secrets | **0** |
+| BDD scenarios | **15** |
+| Smoke assertions, through the gateway | **6** |
 
-```
-username:  reviewer@example.onmicrosoft.com
-password:  REDACTED-PASSWORD
-```
+### Two pipelines, and why
 
-> A disposable account created for this review. It is a **member** of the tenant rather than a
-> guest, so no first-sign-in consent prompt appears. Entra **security defaults are disabled** on
-> this lab tenant, so no MFA registration or challenge screen appears either. You should go
-> straight from password to the order. The account has no role, no Azure access, and nothing
-> attached to it but the ability to obtain an `Orders.Write` token.
+Built for **Azure DevOps**, because the assignment required it. Ported to **GitHub Actions** so
+the pipeline is public and a stranger can open the log rather than take my word for it.
+
+`azure-pipelines.yml` is retained **unchanged** as the original deliverable.
+`.github/workflows/deploy.yml` is its sibling — same six stages in the same order, same Bicep
+templates, same scripts, deploying into a separate resource group so neither can take the SQL
+administrator away from the other.
+
+The Azure DevOps cold start measured **16m58s** on its own agent pool. Different runner, different
+number; it is kept as a labelled comparison in
+[docs/verification-run.md §7](docs/verification-run.md) rather than blended into the figure above.
+
+---
+
+## Live demo
+
+> ### Live until ~22 September 2026
+>
+> The Azure subscription is a free trial and expires around then. After that these URLs stop
+> resolving — which is exactly why the claim above rests on a reproducible pipeline and a written
+> record rather than on a link.
+>
+> **Frontend** — <https://stcouponsvclabgh.z29.web.core.windows.net>
+> **Gateway** — `https://apim-couponsvc-lab-vxziaw.azure-api.net`
+>
+> Browsing the menu and checking a coupon are anonymous. Placing an order requires a sign-in;
+> **evaluation access is available on request.**
 
 **Coupons to try**
 
@@ -40,22 +71,23 @@ A rejected coupon never fails the order. The order is created at full price and 
 which reason applied.
 
 **Worth clicking:** add pizzas, press **Check** with `SPEND50` below €50, then add more until it
-crosses. The preview is a read-only hint. It consumes no redemption. The server recalculates from
+crosses. The preview is a read-only hint that consumes no redemption. The server recalculates from
 scratch when you submit, and the two are allowed to disagree.
 
 ---
 
-## What it does
+## Architecture
 
-- **Two coupon types** — percentage and fixed amount.
-- **Three conditions** — expiry, minimum order value, total redemption limit.
-- **The server decides the price.** No endpoint accepts a price, subtotal or total from the
-  client. The browser sends `pizzaId` and `quantity`. The server resolves every price itself. The
-  code enforces this: you cannot build a priced basket from outside the Ordering assembly.
-- **Preview never mutates.** `POST /coupons/validate` consumes no redemption. Only `POST /orders`
-  redeems, as a single atomic `UPDATE`.
-- **A rejection carries a reason**, never a bare boolean. One enum drives the customer message,
-  the log entry and the test assertion.
+```
+Browser ──► API Management ──► App Service ──► Azure SQL
+  MSAL         subscription key    Easy Auth       Entra-only auth
+  PKCE         validate-jwt        allowedApps     contained user
+```
+
+Four hops, three trust relationships, and no password anywhere in the running system. API
+Management reaches the App Service as a managed identity; the App Service reaches Azure SQL as
+one; the SQL server has Entra-only authentication, so a password does not merely go unused — one
+cannot be created. There is no Key Vault, because there is nothing to store.
 
 | Endpoint | Auth |
 |---|---|
@@ -63,107 +95,17 @@ scratch when you submit, and the two are allowed to disagree.
 | `POST /api/v1/coupons/validate` | APIM subscription key |
 | `POST /api/v1/orders` | subscription key **+** an Entra access token with `Orders.Write` |
 
-Gateway: `https://apim-couponsvc-lab-dtjori.azure-api.net`
+**What the domain does**
 
----
-
-## Deploy it
-
-Everything below the Day 0 line is automated. Deleting the resource group and re-running the
-pipeline produces a working system. This was **tested on 2026-08-30**, not merely designed for:
-the group was deleted and rebuilt from empty in 17 minutes, ending with an order placed through
-the browser against the rebuilt system. [docs/deployment.md](docs/deployment.md) §6 has the stage
-timings and the two soft-deletes that stand in the way.
-
-**Day 0 — by hand, once. Five items.** A pipeline cannot create the credential it uses to log in,
-and it cannot create itself.
-
-1. An Azure DevOps project, this repository, and a pipeline pointed at `azure-pipelines.yml`.
-2. An Azure DevOps service connection (workload identity federation, Contributor on the
-   subscription).
-3. Two Entra app registrations — `coupon-api` and `coupon-spa`. The SPA's redirect URIs go on the
-   **SPA** platform, not `publicClient` and not `web`. This one completes in **two sittings**:
-   the deployed frontend origin cannot be registered until the storage account exists, so the
-   first pipeline run comes before it.
-4. A reviewer test account — a member, with Entra security defaults disabled on the tenant so no
-   MFA challenge blocks sign-in.
-5. The pipeline variables at the top of `azure-pipelines.yml`, set for your subscription and
-   tenant. They name the service connection and both app registrations, so this follows 2 and 3.
-
-Items 1 and 5 are dull and easy to leave out of a list like this, which is exactly why they are
-in it. A reviewer who is told "three" and then finds a fourth has been misled about the thing this
-section exists to be honest about. Only items 2, 3 and 4 have anything interesting in them, and
-[docs/deployment.md](docs/deployment.md) §2 has all of it, including the two `az` commands for the
-redirect URIs that look right and are not.
-
-**Day 1 — the pipeline.** Push to `master`, or run `azure-pipelines.yml` manually.
-
-```
-1  Build and test          dotnet build, BDD suite, publish artifacts
-2  Provision               Bicep: resource group, APIM, App Service, SQL, storage, telemetry
-3  Grant database access   create the contained user for the App Service's managed identity
-4  Deploy backend          push the API; EF migrations run at startup
-5  Build and deploy UI     npm build with the gateway URL injected; upload to $web
-6  Smoke test              six assertions through the gateway and against the live site
-```
-
-**Teardown:** `az group delete --name rg-coupon-service --yes`. Then re-run the pipeline.
-
-Full detail, including the four failures that each cost a deploy cycle:
-[docs/deployment.md](docs/deployment.md).
-
----
-
-## Run it locally
-
-```bash
-dotnet test                                  # Reqnroll BDD suite
-dotnet run --project src/PizzaShop.Api       # API on LocalDB — no Docker needed
-
-cd web
-cp .env.example .env.local                   # fill in the five values
-npm install && npm run dev                   # http://localhost:5173
-```
-
-`http://localhost:5173` is a registered redirect URI and an allowed CORS origin, so a local
-frontend talks to the deployed gateway unchanged. `npm run dev` also enables a token claims panel
-that decodes the live access token. Every production build strips the panel out, and the pipeline
-fails if it ever reaches `dist/`.
-
----
-
-## No passwords
-
-**The running system holds no credential.** API Management reaches the App Service as a managed
-identity. The App Service reaches Azure SQL as one. The SQL server has Entra-only authentication,
-so a password does not merely go unused. One cannot be created. No Key Vault, because there is
-nothing to store.
-
-The reviewer password at the top of this file looks like an exception. It is not one. It is a
-credential *for* a human reviewing the system, not a credential the system uses. Nothing in the
-codebase, the pipeline or any Azure resource reads it, and deleting the account leaves the system
-running unchanged. It is written down here deliberately, because the alternative is a reviewer who
-cannot get in. Delete the account once this review is finished.
-
-The pipeline uses two credentials at deploy time. Both are fetched from ARM at the moment they are
-needed and never stored. The precise claim, and why the storage account key is a *smaller* grant
-than the role assignment that would have replaced it, is in
-[docs/authentication.md](docs/authentication.md) §9.
-
----
-
-## Documentation
-
-| | |
-|---|---|
-| [docs/architecture.md](docs/architecture.md) | The shape, the coupon/ordering split, why one deployable, data model, testing |
-| [docs/deployment.md](docs/deployment.md) | Day 0 and Day 1, the six stages, how to run it, what has already cost a deploy cycle |
-| [docs/authentication.md](docs/authentication.md) | The two credentials, PKCE, gateway-to-backend, passwordless SQL, what is proven and what is not |
-| [docs/assumptions.md](docs/assumptions.md) | Assumptions, known limitations, what would come next |
-
-Also in the repository: [docs/approach.md](docs/approach.md), the approved design document written
-before the build, and [docs/decisions.md](docs/decisions.md), the running log of every non-obvious
-choice made while building, including the ones that turned out to be wrong.
+- **Two coupon types** — percentage and fixed amount.
+- **Three conditions** — expiry, minimum order value, total redemption limit.
+- **The server decides the price.** No endpoint accepts a price, subtotal or total from the
+  client. The browser sends `pizzaId` and `quantity`; the server resolves every price itself. The
+  code enforces this — you cannot build a priced basket from outside the `Ordering` assembly.
+- **Preview never mutates.** `POST /coupons/validate` consumes no redemption. Only `POST /orders`
+  redeems, as a single atomic `UPDATE … WHERE UsageCount < RedemptionLimit`.
+- **A rejection carries a reason**, never a bare boolean. One enum drives the customer message,
+  the log entry and the test assertion.
 
 ```
 src/PizzaShop.Api/              HTTP endpoints, composition root
@@ -174,3 +116,124 @@ tests/PizzaShop.Bdd/            Reqnroll scenarios
 infra/                          Bicep, APIM policies, OpenAPI, deployment scripts
 web/                            React + MSAL frontend
 ```
+
+---
+
+## How the claim is verified
+
+Every pipeline run ends with a smoke test that calls the deployed system **through the gateway**,
+never around it. Six assertions, and each one asserts *which* component rejected the call rather
+than only the status code — a 401 from the subscription-key check and a 401 from `validate-jwt`
+are indistinguishable by status alone.
+
+| | Assertion |
+|---|---|
+| 1 | `GET /menu` with no key → 401, body naming the missing key |
+| 2 | `GET /menu` with a key → 200, body contains a pizza read from Azure SQL |
+| 3 | `POST /orders` with a key, no token → 401 carrying the `validate-jwt` message |
+| 4 | `POST /orders` with a key and a malformed token → 401 |
+| 5 | The static site serves the built app, not just *a* 200 |
+| 6 | The dev-only token claims panel is absent from the deployed bundle |
+
+**If you run it yourself, assertion 2 will look stuck.** On a cold deployment it took 25 attempts
+over **165 seconds** — the App Service's first boot runs EF Core migrations and seeds the database
+before it serves anything. The smoke test polls for exactly this reason; a single call would
+return 404 and send you to the API Management routing configuration, where the problem is not. On
+a warm deployment the same assertion passes on attempt 1 in about 10 seconds.
+
+Alongside it, **15 Reqnroll BDD scenarios** run before any Azure resource is created, so nothing
+is ever provisioned for code that does not compile.
+
+Timings, per-job durations, the full smoke output, and three assumptions that this run turned into
+observations: **[docs/verification-run.md](docs/verification-run.md)**.
+
+---
+
+## Run it yourself
+
+**Locally** — no Docker, no Azure account:
+
+```bash
+dotnet test                                  # 15 Reqnroll BDD scenarios
+dotnet run --project src/PizzaShop.Api       # API on LocalDB
+
+cd web
+cp .env.example .env.local                   # fill in the five values
+npm install && npm run dev                   # http://localhost:5173
+```
+
+`http://localhost:5173` is a registered redirect URI and an allowed CORS origin, so a local
+frontend talks to the deployed gateway unchanged. `npm run dev` also enables a token claims panel
+that decodes the live access token; every production build strips it, and the pipeline fails if it
+ever reaches `dist/`.
+
+**Deploying your own** — everything below the Day 0 line is automated. Deleting the resource group
+and re-running the pipeline produces a working system.
+
+**Day 0 — by hand, once. Five items.** A pipeline cannot create the credential it logs in with,
+and it cannot create itself.
+
+1. A GitHub repository with `.github/workflows/deploy.yml` on `main`.
+2. An Entra app registration with a **federated credential** for GitHub OIDC, and **Contributor at
+   subscription scope**. No client secret exists.
+3. Repository **variables** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` — on the
+   Variables tab, not Secrets. All three are public identifiers.
+4. Two Entra app registrations, `coupon-api` and `coupon-spa`. The SPA's redirect URIs go on the
+   **SPA** platform — not `publicClient`, not `web`. This one completes in **two sittings**: the
+   deployed frontend origin cannot be registered until the storage account exists, so the first
+   pipeline run comes before it.
+5. The `env:` block at the top of the workflow, set for your subscription and tenant.
+
+Items 1 and 5 are dull and easy to leave out of a list like this, which is why they are in it.
+Contributor is sufficient and deliberately not more: the deployment contains no Azure RBAC role
+assignment at all, so the power to create one is never needed.
+[docs/deployment.md](docs/deployment.md) §2 has the detail, including the two `az` commands for
+the redirect URIs that look right and are not, and the Azure DevOps equivalents of items 1–3.
+
+**Day 1 — the pipeline.** Push to `main`, or dispatch the workflow manually.
+
+```
+1  Build and test          dotnet build, BDD suite, publish artifacts
+2  Provision               Bicep: resource group, APIM, App Service, SQL, storage, telemetry
+3  Grant database access   create the contained user for the App Service's managed identity
+4  Deploy backend          push the API; EF migrations run at startup
+5  Build and deploy UI     npm build with the gateway URL injected; upload to $web
+6  Smoke test              six assertions through the gateway and against the live site
+```
+
+**Teardown:** `az group delete --name rg-coupon-service-gh --yes`. Then re-run the pipeline.
+API Management stays name-reserved for 48 hours after deletion; the pipeline purges it on the next
+run, which is the one step the "delete it and re-run" claim actually rests on.
+
+---
+
+## No passwords
+
+**The running system holds no credential.** Not in configuration, not in an environment variable,
+not in a Key Vault — there is no Key Vault. Service-to-service authentication is managed identity
+throughout, and the SQL server accepts nothing else.
+
+The **pipeline** uses two credentials at deploy time, and this is the honest boundary: an API
+Management subscription key and a storage account key, both fetched from ARM at the moment they
+are needed, used inside a single step, and never written to a file or published as a variable. The
+precise claim — and why the storage account key is a *smaller* grant than the role assignment that
+would have replaced it — is in [docs/authentication.md](docs/authentication.md) §9.
+
+Authentication to Azure itself is workload identity federation over OIDC in both pipelines. There
+is no client secret to store or rotate.
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| [docs/verification-run.md](docs/verification-run.md) | The cold-start run in full: timings, smoke output, what it settled |
+| [docs/architecture.md](docs/architecture.md) | The shape, the coupon/ordering split, why one deployable, data model, testing |
+| [docs/deployment.md](docs/deployment.md) | Day 0 and Day 1, the six stages, what has already cost a deploy cycle |
+| [docs/authentication.md](docs/authentication.md) | The two credentials, PKCE, gateway-to-backend, passwordless SQL, what is proven and what is not |
+| [docs/assumptions.md](docs/assumptions.md) | Assumptions, known limitations, what would come next |
+
+Also here: [docs/approach.md](docs/approach.md), the design document written before the build, and
+[docs/decisions.md](docs/decisions.md), a running log of every non-obvious choice made while
+building — including the ones that turned out to be wrong.

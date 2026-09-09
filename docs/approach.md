@@ -1,6 +1,6 @@
 # Coupon Service — Proposed Approach
 
-**Khalid Shams** · Technical assignment for Bangladesh Software Solution
+**Khalid Shams** · Technical assignment for a software consultancy
 
 ---
 
@@ -351,6 +351,8 @@ Health checks use `Microsoft.Extensions.Diagnostics.HealthChecks`. Liveness chec
 4. One currency, no tax or delivery fee.
 5. Orders are stored but not fulfilled. There's no payment step.
 6. The reviewer will use a pre-created test account, documented in the README. It is a **member** of the tenant rather than a guest, so no first-sign-in consent prompt can appear in front of them.
+
+   **2026-09-10 — withdrawn.** The account is disabled and its credential is gone from this repository and its history, so the README documents no account; evaluation access is offered on request instead. The assumption is left as written above because this document records what was agreed *before* the build. The current position is [assumptions.md](assumptions.md) §6.
 
 **Known limitations**
 

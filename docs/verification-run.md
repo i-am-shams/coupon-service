@@ -121,6 +121,35 @@ No assertion needs a user credential, which is why the reviewer test account is 
 prerequisite for this pipeline; it is also why a green run is not evidence that `validate-jwt`
 *accepts* a real token.
 
+### The sign-in path, closed by hand — recorded 2026-09-10
+
+The gap above is real and stays described. It now has a hand-run result beside it.
+
+Against the deployment from this run, the deployed origin
+`https://stcouponsvclabgh.z29.web.core.windows.net` was added to `coupon-spa`'s redirect URIs on
+the **SPA** platform — the second sitting of Day 0 item 4, which cannot happen before a first
+provision because the origin is not knowable until the storage account exists. Then, in a browser:
+sign in through the MSAL redirect flow, add pizzas, apply a coupon, submit.
+
+| | |
+|---|---|
+| Result | **Order #1**, coupon applied |
+| Sign-in | No perceptible delay — about a second, by observation rather than measurement |
+
+**Order #1 is the part worth recording.** No smoke assertion places an order, so the `Orders`
+table was untouched by the pipeline. An identity counter starting at 1 means the database was
+created and seeded from empty by this deployment, with nothing carried over — the same proof the
+Azure DevOps rebuild used in `decisions.md`, phase G. It also exercises the one path the six
+assertions cannot: a real user token minted by Entra, accepted by `validate-jwt` at the gateway,
+with the redemption written through the App Service's managed identity.
+
+**This does not close the automation gap, and is not recorded as if it did.** It is one manual
+observation, on one date, by one person. Nothing in the pipeline will catch a regression on this
+path; a green run still proves only that `validate-jwt` *rejects*. Automating it would mean a
+browser-driver run holding a real user credential — `assumptions.md` §8 explains why that trade
+was declined. What changed is that the sign-in path has now been shown to work at least once, and
+when it was checked is written down.
+
 ### Unit and BDD scenarios
 
 ```
